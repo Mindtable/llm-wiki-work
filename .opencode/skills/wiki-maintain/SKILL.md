@@ -1,0 +1,12 @@
+---
+name: wiki-maintain
+description: Manually process a bounded number of jobs, save proposals, and complete them only after human review and a Git commit
+---
+
+Run `wiki maintenance run` only as a separate manual operation with an explicit small `limit`. Before selecting a job, the CLI finds new user files in `sources/raw/`, saves them as `unclassified` sources, and queues ingest jobs. This command processes a bounded queue and saves a JSON proposal in `.state/proposals/`; contents in `wiki/` are not published automatically. For a file outside `sources/raw/` or to explicitly register a specified kind, use `wiki-ingest`; for a report about a disagreement, use `wiki-feedback`.
+
+Distinguish technical and substantive statuses: `failed` means execution failed, while `rejected` is a substantive outcome; `ready_for_review` means the proposal has been saved and is waiting for a person. Before publication, check the evidence, complete contents of each page, links, metadata, `source_refs`, `depends_on`, and conflicting versions. Add an entry about the operation, pages, source revisions, and report IDs to `wiki/log.md` before the Git commit; do not include the future commit's SHA or `published_revision`.
+
+Call `wiki maintenance complete` only after reviewing the result. For `proposed`, the CLI must confirm that the agreed contents are present in the specified current Git commit. After the commit, use the returned full SHA for `maintenance complete` and the request status; do not add it retroactively to an entry already included in that commit. If a person changes the contents during review, first update `changes` in the saved `.state/proposals/<job-id>.json`, then write the same contents to the wiki and commit; the CLI will reread and validate the proposal. For `rejected` or `needs_evidence`, no Git revision is needed; call `complete` with the job ID after reviewing the rationale. Keep technical job statuses (`pending`, `processing`, `ready_for_review`, `failed`, `resolved`) distinct from feedback outcomes (`resolved`, `rejected`, `needs_evidence`). Retry only through a separate explicit `retry` command after fixing the cause of the failure.
+
+The queue in `.state/queue.sqlite3` stores unfinished work and is not included in Git. Use the SQLite backup API to make a backup consistent with the live database. This is a local manual process; no daemon or schedule is created here.

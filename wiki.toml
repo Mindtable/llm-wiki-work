@@ -1,0 +1,8 @@
+[ask]
+executable = "opencode"
+agent = "librarian"
+model = ""
+# Set this explicitly during setup, for example: model = "provider/model"
+# variant = "high" # Optional provider-specific variant.
+timeout_seconds = 120
+max_steps = 8

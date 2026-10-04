@@ -1,0 +1,11 @@
+# Task 2: Source and Review Queue Report
+
+Implemented the source registry, search/lint, feedback queue, and manual-review maintenance workflow in `src/wiki_tools/`. The registry stores snapshots at `sources/raw/<source_id>/<sha256><suffix>` and immutable per-revision manifests at `sources/manifests/<source_id>--<sha256>.json`. Imports preserve older bytes, serialize updates with a local file lock, and report an explicit `historical_revision` error if a repeated import would appear to restore an older snapshot.
+
+Search covers wiki Markdown and the current registered text revision for each source. Results include paths, IDs, source revisions, line locators, and snippets. Lint verifies manifest paths and hashes, page metadata, source references, and local Markdown links and anchors. Linted page frontmatter is a JSON object between `---` delimiters; `wiki/index.md` and `wiki/log.md` are exempt. Unsupported input formats produce warnings, and a `code_summary` remains explicitly labeled as derived material.
+
+Feedback and ingest jobs use `.state/queue.sqlite3`. Repeated feedback IDs with the same normalized JSON payload return the existing job; changed payloads raise `idempotency_conflict`. Ingest requires a registered, hash-verified revision. Maintenance claims work under an OS-released single-writer lock, saves validated proposals under `.state/proposals/<job_id>.json`, and leaves `wiki/` untouched. Executor or validation failures become technical `failed` jobs. Failed and interrupted jobs require an explicit `retry_job()` call. Jobs use `pending`, `processing`, `ready_for_review`, `failed`, and `resolved`; feedback outcomes after review are `resolved`, `rejected`, or `needs_evidence`.
+
+Proposed changes require registered evidence and valid page metadata. Completion of a proposed correction requires a full Git commit equal to current `HEAD`, with every proposed file matching its committed bytes exactly. Rejected and `needs_evidence` outcomes can be completed without a commit and never receive a `published_revision`.
+
+Focused tests pass under bundled CPython 3.12.14: 8 source tests, 6 knowledge tests, 3 feedback tests, and 9 maintenance tests (26 total). The parent will run the integrated repository suite after CLI integration.

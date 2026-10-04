@@ -1,0 +1,9 @@
+{
+  "feedback_id": "demo-express-priority-conflict",
+  "answer_id": "<answer_id from the actual answer>",
+  "wiki_revision": "<wiki_revision from the actual answer>",
+  "target": "Claim about the priority for screening_code=EXPRESS",
+  "description": "The procedure and workflow specify priority=urgent, but the demonstration code summary describes priority=standard. Check whether the source code is available and which version it belongs to.",
+  "evidence": [],
+  "suggested_correction": "Do not choose a value until the source code for the applicable version has been checked; preserve the discrepancy with separate supporting evidence."
+}
