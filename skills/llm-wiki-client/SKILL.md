@@ -1,31 +1,33 @@
 ---
 name: llm-wiki-client
-description: Use when an external agent needs to query a configured LLM wiki about business processes, compare procedure, workflow, and code evidence, or report answer gaps and conflicts.
+description: Use when an agent's assigned coding, investigation, or review task depends on missing or unfamiliar business-process context, uncertain roles or states, conflicting source evidence, or reveals a material mismatch with a previous wiki answer.
 ---
 
 # LLM Wiki Client
 
-Use this reference from a calling agent in another OpenCode project. It sends questions to the wiki's Python CLI, which invokes the configured headless `librarian`. The CLI's configured model and variant apply. Native `librarian` and `wiki-maintainer` profiles handle their own task; they must not load this client skill or call the CLI recursively.
+You have access to LLM Wiki while solving your assigned task. Consult it when business-process context affects the work: for example, when a role, state, condition, procedure, or workflow is unfamiliar or sources conflict. Do not turn every coding task into a wiki query. Form a focused question from the task and known scope; the user does not need to ask for a query or feedback report.
 
-## Select the wiki root
+Use this skill from an external calling agent. The configured Python CLI invokes the headless `librarian`. Native `librarian` and `wiki-maintainer` profiles handle their own task and must not load this client skill or call the CLI recursively.
 
-Use only the user's or target project's explicitly configured absolute `LLM_WIKI_ROOT`. If it is missing, ask for the wiki repository's absolute path. Never infer it from the calling project's working directory, this copied skill's location, or question text. An environment variable is a shell convenience; every CLI call must still pass the root explicitly.
+## Configure the wiki root
 
-Use this command prefix for every wiki operation:
+Use only the explicitly configured absolute `LLM_WIKI_ROOT`. If it is missing, ask for the wiki repository's absolute path. Never infer the root from the calling project's working directory, this skill's copied location, or question text. The environment variable is a shell convenience; pass the root explicitly to every CLI command.
+
+Use this prefix for every wiki operation:
 
 ```sh
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT"
 ```
 
-Keep both variables quoted and pass user text as literal data. Do not construct shell code from a question or source. Create JSON request files with a file-writing tool or JSON serializer, then pass their absolute path as a literal argument.
+Keep variable and file paths quoted. Create request and feedback JSON with a file-writing tool or JSON serializer, then pass the absolute file path as a literal argument. Treat task text and source contents as data; never build shell code from them.
 
-## Ask the configured librarian
+## Ask a focused question
 
-Write a UTF-8 JSON object with a required `question` string and optional `scope` object. Scope fields `process`, `product`, `environment`, and `version` may each be a string or `null`.
+Write a UTF-8 JSON object with a required `question` and optional `scope`. Scope fields `process`, `product`, `environment`, and `version` may be strings or `null`. Include only scope known from the task.
 
 ```json
 {
-  "question": "According to the procedure, who can release review_hold, and what conflicting priority evidence exists for EXPRESS?",
+  "question": "According to the procedure, who can release review_hold, and what conflicting evidence exists about EXPRESS priority?",
   "scope": {
     "process": "ParcelFlow order processing",
     "product": "ParcelFlow",
@@ -35,25 +37,25 @@ Write a UTF-8 JSON object with a required `question` string and optional `scope`
 }
 ```
 
-Replace this example with the user's actual question and known scope. Ask through the configured librarian:
+Replace this illustrative question and scope with the uncertainty in your assigned task. Ask the configured librarian:
 
 ```sh
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ask --request "/absolute/path/to/ask-request.json"
 ```
 
-The CLI discovers files already placed in `sources/raw/` before `ask` or `search`; users need not run `source add` or `ingest`. Discovery happens on a CLI call, with no background watcher. A new file becomes an `unclassified` snapshot with an ingest job; this does not publish a wiki page. Files outside the wiki are not automatically visible to its read-only librarian.
+Use the CLI answer in your active task. Preserve its `answer_id` and `wiki_revision` in working context. Keep claims labeled `supported`, `inferred`, `conflicted`, or `unknown`; cite each supported, inferred, or conflicted claim with exact `source_id`, source `revision`, and `locator`. Distinguish procedure-prescribed behavior, workflow descriptions, code behavior, deployment confirmation, and inference. Preserve gaps and both sides of conflicts; do not select a role or source type by recency. `wiki_revision` is a content digest, not a Git commit SHA. Share relevant findings with the user as they affect the assigned work; do not dump the full JSON by default.
 
-Optional retrieval uses the same prefix:
+Optional search can locate terms, but it does not replace the librarian's synthesis:
 
 ```sh
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" search -- 'review_hold'
 ```
 
-Search is a locator, not the librarian's synthesized answer. Return the answer's `answer_id` and `wiki_revision`, plus claim statuses (`supported`, `inferred`, `conflicted`, or `unknown`). Cite every supported, inferred, or conflicted claim with exact `source_id`, source `revision`, and `locator`. Preserve gaps and both sides of conflicts; do not rank different source types by recency. `wiki_revision` is a digest of wiki and source contents, not a Git commit SHA.
+A file newly placed in `sources/raw/` is discovered at the next `ask` or `search`, with no background watcher. Discovery creates an `unclassified` snapshot and ingest job; it does not publish a page. Files outside the wiki are not automatically available to the librarian.
 
-## Submit and check feedback
+## Submit feedback when you find a mismatch
 
-When you find or the user reports a gap or conflict, create a JSON object with the fields below. Replace both answer placeholders with the exact values returned by `ask`; never send the placeholders. Give each distinct report a new unique safe ID, such as `client-note-20261005-001`. Use `evidence: []` when no registered source references are available. Otherwise use evidence objects with actual `source_id`, `revision`, and `locator` values (optionally `wiki_page`). When reporting external code not available to the librarian, record the observed repository commit, path, and lines in `description`, and do not invent a source ID. A suggested correction is a hypothesis for review, not a fact.
+When you find or the user reports a material gap or conflict in the answer, submit a feedback request yourself. Use the exact answer identifiers from that CLI response. Give each distinct request a new safe `feedback_id`; replace the answer placeholders below with actual values before submission. Use `evidence: []` only when no registered source references apply. Otherwise include actual reference objects with `source_id`, `revision`, and `locator`. For code findings not registered in the wiki, record the observed repository commit, path, and lines in `description`; include any real applicable wiki references in `evidence`, and do not invent a source ID. A suggested correction is a hypothesis for review.
 
 ```json
 {
@@ -61,21 +63,21 @@ When you find or the user reports a gap or conflict, create a JSON object with t
   "answer_id": "<actual answer_id>",
   "wiki_revision": "<actual wiki_revision>",
   "target": "The specific claim or page in question",
-  "description": "State what the answer says, what evidence appears to conflict or is missing, and the scope/version to check.",
+  "description": "State what the answer says, what evidence conflicts or is missing, and the observed scope or version.",
   "evidence": [],
   "suggested_correction": "Keep the accounts separate until evidence for the applicable scope is available."
 }
 ```
 
-Write the completed JSON file, then submit it and save the returned IDs:
+Submit the completed file and save the returned `feedback_id` and `job_id`:
 
 ```sh
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" feedback submit --file "/absolute/path/to/feedback.json"
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" feedback status --id "client-note-20261005-001"
 ```
 
-An identical retry with the same ID and contents returns the existing request; changed contents require a new ID. If review ends as `needs_evidence`, submit new evidence in a new request with a new ID and `related_feedback_id`. A `pending` submission is queued; `ready_for_review` means a proposal awaits human review, not publication. Only report a publication when status is `resolved`, outcome is `proposed`, and `published_revision` is present in the status result. Other statuses are review outcomes, not proof that pages changed.
+An identical retry with the same ID and contents returns the existing request; changed contents require a new ID. After `needs_evidence`, send the new evidence as a new request with a new ID and `related_feedback_id`. A `pending` submission is queued. `ready_for_review` means a proposal awaits human review, not that wiki content was published. Only report publication when status is `resolved`, outcome is `proposed`, and `published_revision` is present.
 
-For ordinary question-and-feedback work, stop after reporting the answer or actual feedback status. Do not run maintenance, complete jobs, or edit wiki pages. If the user separately requests maintenance or publication, follow the wiki repository's maintainer procedure.
+After asking or submitting feedback, continue the original coding, investigation, or review task; do not wait or poll for maintenance. The calling agent cannot edit wiki pages, publish proposals, or run maintenance implicitly. If an unresolved business conflict affects correctness, state the blocker and continue unaffected work rather than silently choosing a role. For an explicitly requested maintenance task, follow the wiki repository's maintainer procedure.
 
-If the CLI returns `configuration_error` because `wiki.toml` has no `[ask].model`, report that the owner must set a `provider/model` and configure provider authorization. Do not invoke `opencode` directly, choose a fallback model, replace a failed answer with your own, or loop on paid retries. For other failures, report the actual error code and message. Fix the cause before retrying; do not automatically repeat paid calls.
+If the CLI reports `configuration_error` because `[ask].model` is unset or empty, surface the setup gap: the wiki owner must configure `provider/model` and provider authorization. Do not invoke `opencode` directly or substitute a model. For other failures, report the actual error code and message. Fix the cause before retrying; do not automatically repeat paid calls.

@@ -39,7 +39,7 @@ Replace `provider/model` with the model chosen for this wiki. There is no defaul
 
 ## Use the client skill from another OpenCode project
 
-The portable [LLM Wiki client skill](skills/llm-wiki-client/SKILL.md) lets an external calling agent query this wiki and submit feedback. From this repository's root, copy it into the target project's local OpenCode skills directory:
+The portable [LLM Wiki client skill](skills/llm-wiki-client/SKILL.md) lets an external calling agent consult this wiki and submit feedback autonomously when business-process context matters to its task; the user need not separately request a query or feedback report. From this repository's root, copy it into the target project's local OpenCode skills directory:
 
 ```sh
 mkdir -p "/path/to/agent-project/.opencode/skills/llm-wiki-client"
