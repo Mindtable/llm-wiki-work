@@ -37,6 +37,18 @@ max_steps = 8
 
 Replace `provider/model` with the model chosen for this wiki. There is no default model; an empty `model` intentionally results in `configuration_error`. You may add `variant` if the provider supports it. Authorization keys are stored through OpenCode's standard mechanism; do not put secrets in repository files.
 
+## Use the client skill from another OpenCode project
+
+The portable [LLM Wiki client skill](skills/llm-wiki-client/SKILL.md) lets an external calling agent query this wiki and submit feedback. From this repository's root, copy it into the target project's local OpenCode skills directory:
+
+```sh
+mkdir -p "/path/to/agent-project/.opencode/skills/llm-wiki-client"
+cp -n "skills/llm-wiki-client/SKILL.md" "/path/to/agent-project/.opencode/skills/llm-wiki-client/SKILL.md"
+export LLM_WIKI_ROOT="/absolute/path/to/llm-wiki-work"
+```
+
+Replace both paths with the actual absolute paths; run the export in the target agent's launch environment or set `LLM_WIKI_ROOT` in local, untracked project instructions. Keep machine-specific paths out of committed files. OpenCode loads the skill from `.opencode/skills/llm-wiki-client/SKILL.md`; see the [OpenCode skills guide](https://opencode.ai/docs/skills/).
+
 ## Ordinary use
 
 To add material without a separate import command, copy a regular file with a file manager or editor into `sources/raw/` or an ordinary subdirectory. Wait for the copy to finish, then ask the calling agent a question; it will call the configured Python CLI route, which discovers the file before `wiki ask`. The `/wiki-ask` shortcut is also available. For each discovered file, Python leaves the original in place, creates an immutable hash snapshot and manifest, assigns kind `unclassified`, and queues an ingest job. Users do not need to run `wiki source add` or `wiki ingest` for such a file.
