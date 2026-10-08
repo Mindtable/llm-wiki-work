@@ -28,21 +28,21 @@ class _JsonArgumentParser(argparse.ArgumentParser):
     def exit(self, status: int = 0, message: str | None = None) -> None:
         if status == 0:
             raise _HelpRequested(getattr(self, "_help_text", self.format_help()))
-        raise WikiError("argument_error", (message or "ошибка аргументов").strip())
+        raise WikiError("argument_error", (message or "Argument error.").strip())
 
     def error(self, message: str) -> None:
         raise WikiError("argument_error", message)
 
 
 def _build_parser() -> _JsonArgumentParser:
-    parser = _JsonArgumentParser(prog="wiki", description="Локальная wiki с источниками и проверяемыми ответами")
-    parser.add_argument("--root", type=Path, help="абсолютный или относительный путь к корню wiki")
+    parser = _JsonArgumentParser(prog="wiki", description="Local wiki with sources and verifiable answers.")
+    parser.add_argument("--root", type=Path, help="Absolute or relative path to the wiki root.")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_JsonArgumentParser)
 
-    source = commands.add_parser("source", help="управление снимками источников")
+    source = commands.add_parser("source", help="Manage source snapshots.")
     source_commands = source.add_subparsers(dest="source_command", required=True)
-    source_add = source_commands.add_parser("add", help="сохранить неизменяемый снимок источника")
-    source_add.add_argument("path", help="путь к локальному исходному файлу")
+    source_add = source_commands.add_parser("add", help="Save an immutable source snapshot.")
+    source_add.add_argument("path", help="Path to a local source file.")
     source_add.add_argument("--id", required=True, dest="source_id")
     source_add.add_argument(
         "--kind",
@@ -52,33 +52,33 @@ def _build_parser() -> _JsonArgumentParser:
     source_add.add_argument("--origin", default="")
     source_add.add_argument("--upstream-revision", default="")
 
-    ingest = commands.add_parser("ingest", help="добавить разбор источника в очередь")
+    ingest = commands.add_parser("ingest", help="Queue a source for ingestion.")
     ingest.add_argument("source_id")
     ingest.add_argument("revision")
 
-    search = commands.add_parser("search", help="поиск по текущим страницам wiki")
-    search.add_argument("query", nargs="+", help="слова или фраза для поиска")
+    search = commands.add_parser("search", help="Search current wiki pages.")
+    search.add_argument("query", nargs="+", help="Words or a phrase to search for.")
 
-    ask_parser = commands.add_parser("ask", help="задать вопрос настроенному библиотекарю")
-    ask_parser.add_argument("--request", dest="request_file", type=Path, help="JSON-файл с question и необязательным scope")
+    ask_parser = commands.add_parser("ask", help="Ask the configured librarian.")
+    ask_parser.add_argument("--request", dest="request_file", type=Path, help="JSON file with question and optional scope.")
 
-    feedback = commands.add_parser("feedback", help="отправка и проверка замечаний")
+    feedback = commands.add_parser("feedback", help="Submit and check feedback.")
     feedback_commands = feedback.add_subparsers(dest="feedback_command", required=True)
-    submit = feedback_commands.add_parser("submit", help="сохранить замечание")
+    submit = feedback_commands.add_parser("submit", help="Save feedback.")
     submit.add_argument("--file", required=True, dest="feedback_file", type=Path)
-    status = feedback_commands.add_parser("status", help="показать состояние замечания")
+    status = feedback_commands.add_parser("status", help="Show feedback status.")
     status.add_argument("--id", required=True, dest="feedback_id")
 
-    lint = commands.add_parser("lint", help="проверить структуру wiki и ссылки")
+    lint = commands.add_parser("lint", help="Check wiki structure and links.")
 
-    maintenance = commands.add_parser("maintenance", help="ручная обработка очереди")
+    maintenance = commands.add_parser("maintenance", help="Process the queue manually.")
     maintenance_commands = maintenance.add_subparsers(dest="maintenance_command", required=True)
-    run = maintenance_commands.add_parser("run", help="подготовить ограниченное число предложений")
+    run = maintenance_commands.add_parser("run", help="Prepare a bounded number of proposals.")
     run.add_argument("--limit", type=int, default=1)
-    complete = maintenance_commands.add_parser("complete", help="зафиксировать результат ручной проверки")
+    complete = maintenance_commands.add_parser("complete", help="Record the manual review result.")
     complete.add_argument("--id", required=True, dest="job_id")
-    complete.add_argument("--revision", help="проверенный полный Git commit для предложенного изменения")
-    retry = maintenance_commands.add_parser("retry", help="явно вернуть задание в очередь")
+    complete.add_argument("--revision", help="Full Git commit verified for a proposed change.")
+    retry = maintenance_commands.add_parser("retry", help="Explicitly return a job to the queue.")
     retry.add_argument("--id", required=True, dest="job_id")
     return parser
 
@@ -121,7 +121,7 @@ def _discover_root() -> Path:
     for candidate in module.parents:
         if (candidate / "wiki.toml").is_file():
             return candidate.resolve()
-    raise WikiError("configuration_error", "не удалось найти корень заготовки; передайте --root PATH")
+    raise WikiError("configuration_error", "Failed to find the wiki root; pass --root PATH.")
 
 
 def _select_root(value: Path | None) -> Path:
@@ -130,9 +130,9 @@ def _select_root(value: Path | None) -> Path:
     try:
         resolved = value.expanduser().resolve(strict=True)
     except OSError as exc:
-        raise WikiError("configuration_error", f"корень wiki не найден: {value}") from exc
+        raise WikiError("configuration_error", f"Wiki root was not found: {value}.") from exc
     if not resolved.is_dir():
-        raise WikiError("configuration_error", "корень wiki должен быть каталогом")
+        raise WikiError("configuration_error", "Wiki root must be a directory.")
     return resolved
 
 
@@ -140,7 +140,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"повторяющийся JSON-ключ: {key}")
+            raise ValueError(f"Duplicate JSON key: {key}.")
         result[key] = value
     return result
 
@@ -149,9 +149,9 @@ def _read_json_object(path: Path, description: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise WikiError("argument_error", f"не удалось прочитать JSON {description}: {exc}") from exc
+        raise WikiError("argument_error", f"Failed to read {description} JSON: {exc}.") from exc
     if not isinstance(payload, dict):
-        raise WikiError("argument_error", f"JSON {description} должен быть объектом")
+        raise WikiError("argument_error", f"JSON {description} must be an object.")
     return payload
 
 
@@ -178,19 +178,19 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
     if args.command == "ask":
         if args.request_file is not None:
             if args.question:
-                raise WikiError("argument_error", "используйте либо --request, либо вопрос в командной строке")
-            request = _read_json_object(args.request_file, "запроса")
+                raise WikiError("argument_error", "Use either --request or a question on the command line.")
+            request = _read_json_object(args.request_file, "request")
         else:
             question_parts = getattr(args, "question", [])
             question = " ".join(question_parts)
             if not question.strip():
-                raise WikiError("argument_error", "передайте вопрос позиционно или укажите --request FILE")
+                raise WikiError("argument_error", "Provide a question positionally or use --request FILE.")
             request = {"question": question}
         return ask(root, request)
     if args.command == "feedback" and args.feedback_command == "submit":
         from .feedback import submit_feedback
 
-        return submit_feedback(root, _read_json_object(args.feedback_file, "замечания"))
+        return submit_feedback(root, _read_json_object(args.feedback_file, "feedback"))
     if args.command == "feedback" and args.feedback_command == "status":
         from .feedback import feedback_status
 
@@ -213,7 +213,7 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
         from .maintenance import retry_job
 
         return retry_job(root, args.job_id)
-    raise WikiError("argument_error", "неизвестная команда wiki")
+    raise WikiError("argument_error", "Unknown wiki command.")
 
 
 def _operation_failed(args: argparse.Namespace, result: Any) -> bool:
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _dispatch(args, root)
         _emit(result)
         if _operation_failed(args, result):
-            print("команда завершилась с ошибками; подробности находятся в JSON-результате", file=sys.stderr)
+            print("Command failed; details are in the JSON result.", file=sys.stderr)
             return 1
         return 0
     except _HelpRequested as requested:
@@ -262,13 +262,13 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"error": {"code": exc.code, "message": exc.message}})
         return 1
     except KeyboardInterrupt:
-        message = "операция отменена"
+        message = "Operation cancelled."
         print(message, file=sys.stderr)
         _emit({"error": {"code": "cancelled", "message": message}})
         return 130
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        _emit({"error": {"code": "internal_error", "message": "внутренняя ошибка CLI"}})
+        _emit({"error": {"code": "internal_error", "message": "Internal CLI error."}})
         return 1
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)

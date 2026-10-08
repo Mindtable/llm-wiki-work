@@ -22,7 +22,7 @@ _SNAPSHOT_NAME_RE = re.compile(r"[0-9a-f]{64}(?:\.[A-Za-z0-9]{1,12})?\Z")
 def _root(root: Path) -> Path:
     base = Path(root).expanduser().resolve()
     if not base.is_dir():
-        raise WikiError("root_not_found", f"Корень wiki не найден: {base}")
+        raise WikiError("root_not_found", f"Wiki root not found: {base}.")
     return base
 
 
@@ -54,11 +54,11 @@ def _raw_files(root: Path) -> Iterator[tuple[str, Path]]:
     try:
         raw = safe_managed_path(base, "sources/raw")
     except WikiError as exc:
-        raise WikiError("raw_scan_error", f"Не удалось проверить sources/raw: {exc.message}") from exc
+        raise WikiError("raw_scan_error", f"Failed to inspect sources/raw: {exc.message}.") from exc
     if not raw.exists():
         return
     if raw.is_symlink() or not raw.is_dir():
-        raise WikiError("raw_scan_error", "sources/raw должен быть обычным каталогом")
+        raise WikiError("raw_scan_error", "sources/raw must be a directory, not a symbolic link.")
 
     def onerror(exc: OSError) -> None:
         failing = getattr(exc, "filename", None)
@@ -66,7 +66,7 @@ def _raw_files(root: Path) -> Iterator[tuple[str, Path]]:
             detail = Path(failing).relative_to(base).as_posix() if failing else "sources/raw"
         except ValueError:
             detail = "sources/raw"
-        raise WikiError("raw_scan_error", f"Не удалось просканировать {detail}: {exc}") from exc
+        raise WikiError("raw_scan_error", f"Failed to scan {detail}: {exc}.") from exc
 
     for directory, names, files in os.walk(raw, topdown=True, followlinks=False, onerror=onerror):
         current = Path(directory)
@@ -127,9 +127,9 @@ def raw_drop_files(root: Path) -> list[tuple[str, Path, str, str]]:
             finally:
                 os.close(descriptor)
         except OSError as exc:
-            raise WikiError("raw_scan_error", f"Не удалось прочитать {relative}: {exc}") from exc
+            raise WikiError("raw_scan_error", f"Failed to read {relative}: {exc}.") from exc
         if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
-            raise WikiError("raw_file_changed", f"Файл менялся во время сканирования: {relative}; дождитесь завершения копирования")
+            raise WikiError("raw_file_changed", f"File changed while scanning: {relative}; wait for the copy to finish.")
         source_id = raw_drop_id(relative)
         revision = digest.hexdigest()
         found.append((relative, path, source_id, revision))
@@ -152,10 +152,10 @@ def discover_raw_sources(root: Path) -> list[dict]:
             if manifest["revision"] != scanned_revision:
                 raise WikiError(
                     "raw_file_changed",
-                    f"Файл менялся после сканирования: {relative}; дождитесь завершения копирования",
+                    f"File changed after scanning: {relative}; wait for the copy to finish.",
                 )
             enqueue_ingest(base, source_id, manifest["revision"])
         except WikiError as exc:
-            raise WikiError(exc.code, f"Не удалось обработать raw-файл {relative}: {exc.message}") from exc
+            raise WikiError(exc.code, f"Failed to process raw file {relative}: {exc.message}.") from exc
         manifests.append(manifest)
     return manifests

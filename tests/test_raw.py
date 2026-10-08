@@ -54,6 +54,7 @@ class RawDropTests(unittest.TestCase):
         self.assertEqual(len(self.jobs()), 1)
 
     def test_nested_same_basename_drops_get_distinct_stable_ids_and_repeat_is_idempotent(self):
+        # Escaped Cyrillic folder names verify UTF-8 path hashing and same-basename separation.
         first = self.root / "sources" / "raw" / "\u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u043e\u0434\u0438\u043d" / "notes.txt"
         second = self.root / "sources" / "raw" / "\u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u0434\u0432\u0430" / "notes.txt"
         first.parent.mkdir()

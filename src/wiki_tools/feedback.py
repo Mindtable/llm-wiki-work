@@ -27,19 +27,19 @@ def _canonical(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
-        raise WikiError("invalid_payload", f"Данные должны быть JSON-совместимыми: {exc}") from exc
+        raise WikiError("invalid_payload", f"Payload must be JSON-serializable: {exc}.") from exc
 
 
 def _queue_path(root: Path) -> Path:
     base = Path(root).expanduser().resolve()
     if not base.is_dir():
-        raise WikiError("root_not_found", f"Корень wiki не найден: {base}")
+        raise WikiError("root_not_found", f"Wiki root not found: {base}.")
     ensure_managed_dir(base, ".state")
     path = safe_managed_path(base, ".state/queue.sqlite3")
     if path.is_symlink():
-        raise WikiError("unsafe_path", "База очереди не может быть символической ссылкой")
+        raise WikiError("unsafe_path", "Queue database must not be a symbolic link.")
     if path.exists() and not path.is_file():
-        raise WikiError("unsafe_path", "Файл очереди должен быть обычным файлом")
+        raise WikiError("unsafe_path", "Queue file must be a regular file.")
     return path
 
 
@@ -92,32 +92,32 @@ def _connect(root: Path) -> sqlite3.Connection:
             connection.close()
         except (UnboundLocalError, AttributeError):
             pass
-        raise WikiError("queue_error", f"Не удалось открыть локальную очередь: {exc}") from exc
+        raise WikiError("queue_error", f"Failed to open local queue: {exc}.") from exc
 
 
 def _normalize_feedback(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        raise WikiError("invalid_feedback", "Заявка должна быть JSON-объектом")
+        raise WikiError("invalid_feedback", "Feedback request must be a JSON object.")
     normalized = dict(payload)
     feedback_id = normalized.get("feedback_id")
     if not isinstance(feedback_id, str) or not FEEDBACK_ID_RE.fullmatch(feedback_id):
-        raise WikiError("invalid_feedback", "feedback_id должен быть безопасным непустым идентификатором")
+        raise WikiError("invalid_feedback", "feedback_id must be a safe, non-empty identifier.")
     for field in ("answer_id", "wiki_revision", "description"):
         value = normalized.get(field)
         if not isinstance(value, str) or not value.strip():
-            raise WikiError("invalid_feedback", f"Поле {field} должно содержать текст")
+            raise WikiError("invalid_feedback", f"Field {field} must contain text.")
     target = normalized.get("target")
     if not ((isinstance(target, str) and target.strip()) or (isinstance(target, dict) and target)):
-        raise WikiError("invalid_feedback", "target должен указывать спорное утверждение или страницу")
+        raise WikiError("invalid_feedback", "target must identify a disputed claim or page.")
     evidence = normalized.setdefault("evidence", [])
     if not isinstance(evidence, list):
-        raise WikiError("invalid_feedback", "evidence должен быть списком")
+        raise WikiError("invalid_feedback", "evidence must be a list.")
     if "suggested_correction" in normalized and normalized["suggested_correction"] is not None and not isinstance(normalized["suggested_correction"], str):
-        raise WikiError("invalid_feedback", "suggested_correction должен быть строкой или null")
+        raise WikiError("invalid_feedback", "suggested_correction must be a string or null.")
     if "related_feedback_id" in normalized and normalized["related_feedback_id"] is not None:
         related = normalized["related_feedback_id"]
         if not isinstance(related, str) or not FEEDBACK_ID_RE.fullmatch(related):
-            raise WikiError("invalid_feedback", "related_feedback_id имеет неверный формат")
+            raise WikiError("invalid_feedback", "related_feedback_id has an invalid format.")
     _canonical(normalized)
     return normalized
 
@@ -134,7 +134,7 @@ def submit_feedback(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         if existing is not None:
             if existing["payload"] != encoded:
                 connection.rollback()
-                raise WikiError("idempotency_conflict", "Этот feedback_id уже использован с другим содержимым")
+                raise WikiError("idempotency_conflict", "This feedback_id has already been used with different content.")
             connection.commit()
             return {"feedback_id": feedback_id, "job_id": existing["job_id"], "status": existing["status"], "duplicate": True}
 
@@ -153,14 +153,14 @@ def submit_feedback(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     except sqlite3.Error as exc:
         if connection.in_transaction:
             connection.rollback()
-        raise WikiError("queue_error", f"Не удалось сохранить заявку: {exc}") from exc
+        raise WikiError("queue_error", f"Failed to save feedback request: {exc}.") from exc
     finally:
         connection.close()
 
 
 def feedback_status(root: Path, feedback_id: str) -> dict[str, Any]:
     if not isinstance(feedback_id, str) or not FEEDBACK_ID_RE.fullmatch(feedback_id):
-        raise WikiError("feedback_not_found", "Некорректный feedback_id")
+        raise WikiError("feedback_not_found", "Invalid feedback_id.")
     connection = _connect(root)
     try:
         row = connection.execute(
@@ -169,7 +169,7 @@ def feedback_status(root: Path, feedback_id: str) -> dict[str, Any]:
             (feedback_id,),
         ).fetchone()
         if row is None:
-            raise WikiError("feedback_not_found", f"Заявка {feedback_id} не найдена")
+            raise WikiError("feedback_not_found", f"Feedback request {feedback_id} was not found.")
         return {key: row[key] for key in row.keys()}
     finally:
         connection.close()
@@ -178,7 +178,7 @@ def feedback_status(root: Path, feedback_id: str) -> dict[str, Any]:
 def enqueue_ingest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
     """Queue one ingest job for an existing, hash-verified source revision."""
     if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
-        raise WikiError("unsafe_source_id", "Некорректный source_id")
+        raise WikiError("unsafe_source_id", "Invalid source_id.")
     manifest = get_manifest(root, source_id, revision)
     payload = {"source_id": source_id, "revision": revision, "kind": manifest.get("kind")}
     encoded = _canonical(payload)
@@ -203,6 +203,6 @@ def enqueue_ingest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
     except sqlite3.Error as exc:
         if connection.in_transaction:
             connection.rollback()
-        raise WikiError("queue_error", f"Не удалось добавить источник в очередь: {exc}") from exc
+        raise WikiError("queue_error", f"Failed to queue source: {exc}.") from exc
     finally:
         connection.close()

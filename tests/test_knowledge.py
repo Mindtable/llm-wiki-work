@@ -128,6 +128,7 @@ class KnowledgeTests(unittest.TestCase):
         self.assertIn("invalid_source_refs", codes)
         self.assertIn("invalid_dependencies", codes)
 
+    # Cyrillic headings and anchors are intentional fixtures for Unicode locator validation.
     def test_source_reference_validator_accepts_russian_section_and_wiki_anchors(self):
         root = self.make_root()
         incoming = root / "procedure.md"

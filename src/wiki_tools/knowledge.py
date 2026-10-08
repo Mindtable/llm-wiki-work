@@ -29,7 +29,7 @@ SOURCE_LOCATOR_RE = re.compile(r"(?:line:(\d+)(?:-(\d+))?|section:([\w][\w_-]*))
 def _root(root: Path) -> Path:
     path = Path(root).expanduser().resolve()
     if not path.is_dir():
-        raise WikiError("root_not_found", f"Корень wiki не найден: {path}")
+        raise WikiError("root_not_found", f"Wiki root not found: {path}.")
     return path
 
 
@@ -56,8 +56,8 @@ def _walk_files(
         return
     if not base.is_dir():
         if issue is None:
-            raise WikiError("unsafe_path", f"Ожидался каталог: {relative}")
-        issue(relative, "unsafe_path", "Ожидался каталог")
+            raise WikiError("unsafe_path", f"Expected a directory: {relative}.")
+        issue(relative, "unsafe_path", "Expected a directory.")
         return
     for directory, names, files in os.walk(base, followlinks=False):
         directory_path = Path(directory)
@@ -66,7 +66,7 @@ def _walk_files(
             candidate = directory_path / name
             if candidate.is_symlink():
                 if issue is not None:
-                    issue(_relative(root, candidate), "unsafe_path", "Символическая ссылка в управляемом дереве")
+                    issue(_relative(root, candidate), "unsafe_path", "A symbolic link was found in the managed tree.")
                 continue
             safe_names.append(name)
         names[:] = safe_names
@@ -74,7 +74,7 @@ def _walk_files(
             path = directory_path / name
             if path.is_symlink():
                 if issue is not None:
-                    issue(_relative(root, path), "unsafe_path", "Символическая ссылка в управляемом дереве")
+                    issue(_relative(root, path), "unsafe_path", "A symbolic link was found in the managed tree.")
                 continue
             if not path.is_file():
                 continue
@@ -107,14 +107,14 @@ def _source_records(root: Path, report: dict[str, list[dict[str, Any]]] | None =
         return []
     if not manifests_dir.is_dir():
         if report is not None:
-            report["errors"].append({"code": "unsafe_path", "path": "sources/manifests", "message": "Манифесты должны находиться в каталоге"})
+            report["errors"].append({"code": "unsafe_path", "path": "sources/manifests", "message": "Manifests must be inside a directory."})
         return []
 
     records: list[dict[str, Any]] = []
     for path in sorted(manifests_dir.glob("*.json")):
         if path.is_symlink() or not path.is_file():
             if report is not None:
-                report["errors"].append({"code": "unsafe_path", "path": _relative(root, path), "message": "Манифест должен быть обычным файлом"})
+                report["errors"].append({"code": "unsafe_path", "path": _relative(root, path), "message": "Manifest must be a regular file."})
             continue
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -124,7 +124,7 @@ def _source_records(root: Path, report: dict[str, list[dict[str, Any]]] | None =
             continue
         if not isinstance(record, dict):
             if report is not None:
-                report["errors"].append({"code": "invalid_manifest", "path": _relative(root, path), "message": "Манифест должен быть JSON-объектом"})
+                report["errors"].append({"code": "invalid_manifest", "path": _relative(root, path), "message": "Manifest must be a JSON object."})
             continue
         records.append(record)
     return records
@@ -145,48 +145,48 @@ def _validate_page_metadata(
 
     missing = sorted(REQUIRED_PAGE_FIELDS - metadata.keys())
     if missing:
-        error("missing_page_metadata", "Отсутствуют поля: " + ", ".join(missing))
+        error("missing_page_metadata", "Missing fields: " + ", ".join(missing))
     page_id = metadata.get("id")
     if not isinstance(page_id, str) or not page_id.strip() or "\n" in page_id:
-        error("invalid_page_id", "id страницы должен быть непустой строкой")
+        error("invalid_page_id", "Page id must be a non-empty string.")
     elif page_id in page_ids:
-        error("duplicate_page_id", f"id страницы повторяется: {page_id}")
+        error("duplicate_page_id", f"Duplicate page id: {page_id}.")
     else:
         page_ids.add(page_id)
 
     for field in ("title", "domain"):
         if not isinstance(metadata.get(field), str):
-            error("invalid_page_metadata", f"Поле {field} должно быть строкой")
+            error("invalid_page_metadata", f"Field {field} must be a string.")
     page_kind = metadata.get("kind")
     if not isinstance(page_kind, str) or page_kind not in PAGE_KINDS:
-        error("invalid_page_kind", "kind должен быть process, concept, system, source или source_analysis")
+        error("invalid_page_kind", "kind must be process, concept, system, source, or source_analysis.")
     review_status = metadata.get("review_status")
     if not isinstance(review_status, str) or review_status not in REVIEW_STATES:
-        error("invalid_review_status", "review_status должен быть draft, reviewed или stale")
+        error("invalid_review_status", "review_status must be draft, reviewed, or stale.")
     reviewed_at = metadata.get("reviewed_at")
     if reviewed_at is not None and not isinstance(reviewed_at, str):
-        error("invalid_page_metadata", "reviewed_at должен быть строкой или null")
+        error("invalid_page_metadata", "reviewed_at must be a string or null.")
     if metadata.get("review_status") == "reviewed" and not reviewed_at:
-        error("invalid_page_metadata", "Для reviewed страницы нужен reviewed_at")
+        error("invalid_page_metadata", "reviewed_at is required for a reviewed page.")
 
     source_refs = metadata.get("source_refs")
     if not isinstance(source_refs, list):
-        error("invalid_source_refs", "source_refs должен быть списком")
+        error("invalid_source_refs", "source_refs must be a list.")
     else:
         for item in source_refs:
             if not isinstance(item, dict):
-                error("invalid_source_refs", "Каждая ссылка в source_refs должна быть объектом")
+                error("invalid_source_refs", "Each source_refs entry must be an object.")
                 continue
             source_id = item.get("source_id")
             revision = item.get("revision")
             if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id) or not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
-                error("invalid_source_refs", "Каждая ссылка должна содержать корректные source_id и revision")
+                error("invalid_source_refs", "Each source reference must contain valid source_id and revision values.")
             elif (source_id, revision) not in source_keys:
-                error("unknown_source_ref", f"Источник не зарегистрирован: {source_id}@{revision}")
+                error("unknown_source_ref", f"Source is not registered: {source_id}@{revision}.")
 
     dependencies = metadata.get("depends_on")
     if not isinstance(dependencies, list) or any(not isinstance(item, str) or not item for item in dependencies):
-            error("invalid_dependencies", "depends_on должен быть списком непустых идентификаторов страниц")
+            error("invalid_dependencies", "depends_on must be a list of non-empty page IDs.")
 
 
 def validate_page_document(root: Path, relative: str, text: str) -> dict[str, Any] | None:
@@ -197,12 +197,12 @@ def validate_page_document(root: Path, relative: str, text: str) -> dict[str, An
     try:
         path = safe_managed_path(base, relative)
     except WikiError as exc:
-        raise WikiError("invalid_page_metadata", f"Небезопасный путь страницы: {relative}") from exc
+        raise WikiError("invalid_page_metadata", f"Unsafe page path: {relative}.") from exc
     if not relative.startswith("wiki/") or not relative.endswith(".md"):
-        raise WikiError("invalid_page_metadata", "Страница должна быть Markdown-файлом внутри wiki/")
+        raise WikiError("invalid_page_metadata", "Page must be a Markdown file inside wiki/.")
     metadata, _, parse_error = _parse_frontmatter(text)
     if parse_error or metadata is None:
-        raise WikiError("invalid_page_metadata", parse_error or "Отсутствует frontmatter")
+        raise WikiError("invalid_page_metadata", parse_error or "Frontmatter is missing.")
     source_keys = {
         (record.get("source_id"), record.get("revision"))
         for record in _source_records(base)
@@ -244,24 +244,24 @@ def _markdown_anchors(text: str) -> set[str]:
 def validate_wiki_page_reference(root: Path, wiki_page: str) -> Path:
     """Validate an optional root-relative wiki page citation and anchor."""
     if not isinstance(wiki_page, str) or not wiki_page:
-        raise WikiError("invalid_source_reference", "wiki_page должен быть непустой строкой")
+        raise WikiError("invalid_source_reference", "wiki_page must be a non-empty string.")
     page_name, separator, raw_anchor = wiki_page.partition("#")
     page_name = unquote(page_name)
     if not page_name.startswith("wiki/") or not page_name.endswith(".md"):
-        raise WikiError("invalid_source_reference", "wiki_page должен указывать на Markdown-файл в wiki/")
+        raise WikiError("invalid_source_reference", "wiki_page must point to a Markdown file in wiki/.")
     try:
         page_path = safe_managed_path(root, page_name)
     except WikiError as exc:
-        raise WikiError("invalid_source_reference", "wiki_page выходит за каталог wiki") from exc
+        raise WikiError("invalid_source_reference", "wiki_page escapes the wiki/ directory.") from exc
     if not page_path.is_file():
-        raise WikiError("invalid_source_reference", f"Страница wiki не найдена: {page_name}")
+        raise WikiError("invalid_source_reference", f"Wiki page not found: {page_name}.")
     if separator and raw_anchor:
         try:
             page_text = page_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            raise WikiError("invalid_source_reference", f"Не удалось прочитать страницу wiki: {exc}") from exc
+            raise WikiError("invalid_source_reference", f"Failed to read wiki page: {exc}.") from exc
         if unquote(raw_anchor) not in _markdown_anchors(page_text):
-            raise WikiError("invalid_source_reference", f"Якорь страницы wiki не найден: {wiki_page}")
+            raise WikiError("invalid_source_reference", f"Wiki page anchor not found: {wiki_page}.")
     return page_path
 
 
@@ -276,33 +276,33 @@ def validate_source_reference(
     try:
         manifest = get_manifest(root, source_id, revision)
     except WikiError as exc:
-        raise WikiError("invalid_source_reference", f"Источник {source_id}@{revision} не прошёл проверку") from exc
+        raise WikiError("invalid_source_reference", f"Source snapshot {source_id}@{revision} failed validation.") from exc
     try:
         snapshot = safe_managed_path(root, manifest["local_path"])
     except WikiError as exc:
-        raise WikiError("invalid_source_reference", "Сохранённый путь источника стал небезопасным") from exc
+        raise WikiError("invalid_source_reference", "The saved source path is no longer safe.") from exc
     if snapshot.suffix.lower() not in TEXT_SUFFIXES:
-        raise WikiError("invalid_source_locator", f"Для формата {snapshot.suffix or '(без расширения)'} нельзя проверить точный locator")
+        raise WikiError("invalid_source_locator", f"An exact locator cannot be verified for format {snapshot.suffix or '(no extension)'}.")
     if not isinstance(locator, str):
-        raise WikiError("invalid_source_locator", "locator должен быть строкой")
+        raise WikiError("invalid_source_locator", "locator must be a string.")
     locator_value = locator
     if locator.startswith("section:"):
         locator_value = "section:" + unquote(locator.partition(":")[2])
     match = SOURCE_LOCATOR_RE.fullmatch(locator_value)
     if not match:
-        raise WikiError("invalid_source_locator", f"Неподдерживаемый locator: {locator}")
+        raise WikiError("invalid_source_locator", f"Unsupported locator: {locator}.")
     try:
         source_text = snapshot.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise WikiError("invalid_source_locator", f"Не удалось прочитать текст источника: {exc}") from exc
+        raise WikiError("invalid_source_locator", f"Failed to read source text: {exc}.") from exc
     if match.group(1):
         first = int(match.group(1))
         last = int(match.group(2) or first)
         if first < 1 or last < first or last > len(source_text.splitlines()):
-            raise WikiError("invalid_source_locator", f"Цитата {locator} выходит за строки источника")
+            raise WikiError("invalid_source_locator", f"Locator {locator} is outside the source line range.")
     else:
         if snapshot.suffix.lower() != ".md" or match.group(3) not in _markdown_anchors(source_text):
-            raise WikiError("invalid_source_locator", f"Раздел {locator} не найден в Markdown-источнике")
+            raise WikiError("invalid_source_locator", f"Section {locator} was not found in the Markdown source.")
     if wiki_page is not None:
         validate_wiki_page_reference(root, wiki_page)
     return manifest, snapshot
@@ -331,7 +331,7 @@ def _check_markdown_links(root: Path, path: Path, text: str, report: dict[str, l
         else:
             relative = rel
         if relative in {"..", "."} or relative.startswith("../") or relative.startswith("/"):
-            report["errors"].append({"code": "unsafe_markdown_link", "path": rel, "target": target, "message": "Локальная цель выходит за корень wiki"})
+            report["errors"].append({"code": "unsafe_markdown_link", "path": rel, "target": target, "message": "Local target escapes the wiki root."})
             continue
         try:
             target_path = safe_managed_path(root, relative)
@@ -346,16 +346,16 @@ def _check_markdown_links(root: Path, path: Path, text: str, report: dict[str, l
                 report["errors"].append({"code": "unsafe_markdown_link", "path": rel, "target": target, "message": exc.message})
                 continue
         if not target_path.is_file():
-            report["errors"].append({"code": "broken_markdown_link", "path": rel, "target": target, "message": "Локальная цель ссылки не найдена"})
+            report["errors"].append({"code": "broken_markdown_link", "path": rel, "target": target, "message": "Local link target was not found."})
             continue
         if anchor and target_path.suffix.lower() == ".md":
             try:
                 target_text = target_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
-                report["errors"].append({"code": "unreadable_markdown_link", "path": rel, "target": target, "message": "Не удалось прочитать Markdown-цель"})
+                report["errors"].append({"code": "unreadable_markdown_link", "path": rel, "target": target, "message": "Failed to read Markdown link target."})
                 continue
             if anchor not in _markdown_anchors(target_text):
-                report["errors"].append({"code": "broken_markdown_anchor", "path": rel, "target": target, "message": "Якорь в локальной Markdown-ссылке не найден"})
+                report["errors"].append({"code": "broken_markdown_anchor", "path": rel, "target": target, "message": "Anchor in local Markdown link was not found."})
 
 
 def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
@@ -377,7 +377,7 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
         source_id = record.get("source_id")
         revision = record.get("revision")
         if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id) or not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
-            report["errors"].append({"code": "invalid_manifest", "path": "sources/manifests", "message": "Некорректный source_id или revision"})
+            report["errors"].append({"code": "invalid_manifest", "path": "sources/manifests", "message": "Invalid source_id or revision."})
             continue
         manifest_by_key[(source_id, revision)] = record
         source_ids_by_revision.setdefault(source_id, []).append(record)
@@ -386,7 +386,7 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
         rel = _relative(base, path)
         match = MANIFEST_NAME_RE.fullmatch(path.name)
         if not match:
-            report["errors"].append({"code": "invalid_manifest_name", "path": rel, "message": "Имя должно быть <source_id>--<sha256>.json"})
+            report["errors"].append({"code": "invalid_manifest_name", "path": rel, "message": "Filename must be <source_id>--<sha256>.json."})
             continue
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -396,18 +396,18 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
             continue
         source_id, revision = match.group("source"), match.group("revision")
         if record.get("source_id") != source_id or record.get("revision") != revision:
-            report["errors"].append({"code": "manifest_name_mismatch", "path": rel, "message": "Имя манифеста не совпадает с его source_id/revision"})
+            report["errors"].append({"code": "manifest_name_mismatch", "path": rel, "message": "Manifest filename does not match its source_id/revision."})
         missing = {"source_id", "revision", "kind", "origin", "upstream_revision", "sha256", "captured_at", "local_path", "scope", "supersedes", "derived_from"} - record.keys()
         if missing:
-            report["errors"].append({"code": "invalid_manifest", "path": rel, "message": "Отсутствуют поля: " + ", ".join(sorted(missing))})
+            report["errors"].append({"code": "invalid_manifest", "path": rel, "message": "Missing fields: " + ", ".join(sorted(missing))})
         if record.get("sha256") != revision:
-            report["errors"].append({"code": "manifest_hash_mismatch", "path": rel, "message": "sha256 должен совпадать с revision"})
+            report["errors"].append({"code": "manifest_hash_mismatch", "path": rel, "message": "sha256 must match revision."})
         if not isinstance(record.get("kind"), str) or record.get("kind") not in SOURCE_KINDS:
-            report["errors"].append({"code": "invalid_source_kind", "path": rel, "message": "Неизвестный kind источника"})
+            report["errors"].append({"code": "invalid_source_kind", "path": rel, "message": "Unknown source kind."})
         local_path = record.get("local_path")
         expected_prefix = f"sources/raw/{source_id}/"
         if not isinstance(local_path, str) or not local_path.startswith(expected_prefix):
-            report["errors"].append({"code": "unsafe_source_path", "path": rel, "message": "local_path должен находиться в каталоге источника"})
+            report["errors"].append({"code": "unsafe_source_path", "path": rel, "message": "local_path must be inside the source directory."})
             continue
         try:
             snapshot = safe_managed_path(base, local_path)
@@ -415,7 +415,7 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
             report["errors"].append({"code": "unsafe_source_path", "path": rel, "message": exc.message})
             continue
         if not snapshot.is_file():
-            report["errors"].append({"code": "missing_source_snapshot", "path": local_path, "message": "Снимок источника не найден"})
+            report["errors"].append({"code": "missing_source_snapshot", "path": local_path, "message": "Source snapshot was not found."})
         else:
             try:
                 actual = hashlib.sha256(snapshot.read_bytes()).hexdigest()
@@ -423,31 +423,31 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
                 report["errors"].append({"code": "source_read_error", "path": local_path, "message": str(exc)})
             else:
                 if actual != revision:
-                    report["errors"].append({"code": "source_hash_mismatch", "path": local_path, "message": "Содержимое снимка не совпадает с sha256"})
+                    report["errors"].append({"code": "source_hash_mismatch", "path": local_path, "message": "Source snapshot content does not match sha256."})
         if snapshot.suffix.lower() not in TEXT_SUFFIXES:
-            report["warnings"].append({"code": "unsupported_source_format", "path": local_path, "message": "Хеш проверен, но формат не входит в поддерживаемый текстовый набор"})
+            report["warnings"].append({"code": "unsupported_source_format", "path": local_path, "message": "Hash verified, but the format is not in the supported text set."})
         if record.get("kind") == "code_summary":
-            report["warnings"].append({"code": "derived_summary_not_source_code", "path": local_path, "message": "Зарегистрировано производное саммари; эта запись не подтверждает проверку исходного кода"})
+            report["warnings"].append({"code": "derived_summary_not_source_code", "path": local_path, "message": "A derived summary was registered; this record does not confirm that the source code was checked."})
         if record.get("kind") == "code_summary":
-            report["warnings"].append({"code": "derived_summary_not_source_code", "path": local_path, "message": "Зарегистрировано производное саммари; эта запись не подтверждает проверку исходного кода"})
+            report["warnings"].append({"code": "derived_summary_not_source_code", "path": local_path, "message": "A derived summary was registered; this record does not confirm that the source code was checked."})
 
     for source_id, records in source_ids_by_revision.items():
         revisions = {str(record.get("revision")) for record in records}
         for record in records:
             previous = record.get("supersedes")
             if previous is not None and (not isinstance(previous, str) or previous not in revisions):
-                report["errors"].append({"code": "broken_source_history", "path": "sources/manifests", "message": f"{source_id} supersedes отсутствующую ревизию {previous}"})
+                report["errors"].append({"code": "broken_source_history", "path": "sources/manifests", "message": f"Source {source_id} supersedes missing revision {previous}."})
             derived_from = record.get("derived_from", [])
             if not isinstance(derived_from, list):
-                report["errors"].append({"code": "invalid_derived_from", "path": "sources/manifests", "message": f"{source_id} derived_from должен быть списком"})
+                report["errors"].append({"code": "invalid_derived_from", "path": "sources/manifests", "message": f"{source_id} derived_from must be a list."})
             else:
                 for reference in derived_from:
                     if not isinstance(reference, dict):
-                        report["errors"].append({"code": "unknown_derived_source", "path": "sources/manifests", "message": f"{source_id} содержит неизвестную derived_from ссылку"})
+                        report["errors"].append({"code": "unknown_derived_source", "path": "sources/manifests", "message": f"Source {source_id} contains an unknown derived_from reference."})
                         continue
                     ref_id, ref_revision = reference.get("source_id"), reference.get("revision")
                     if not isinstance(ref_id, str) or not isinstance(ref_revision, str) or (ref_id, ref_revision) not in manifest_by_key:
-                        report["errors"].append({"code": "unknown_derived_source", "path": "sources/manifests", "message": f"{source_id} содержит неизвестную derived_from ссылку"})
+                        report["errors"].append({"code": "unknown_derived_source", "path": "sources/manifests", "message": f"Source {source_id} contains an unknown derived_from reference."})
         try:
             source_tip(records)
         except WikiError as exc:
@@ -465,7 +465,7 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
                 report["warnings"].append({
                     "code": "unregistered_raw_source",
                     "path": relative,
-                    "message": "Содержимое raw-файла не совпадает с текущей зарегистрированной ревизией",
+                    "message": "Raw file contents do not match the currently registered revision.",
                 })
     except WikiError as exc:
         report["errors"].append({"code": exc.code, "path": "sources/raw", "message": exc.message})
@@ -494,7 +494,7 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
         dependencies = metadata.get("depends_on", [])
         for dependency in dependencies if isinstance(dependencies, list) else []:
             if isinstance(dependency, str) and dependency not in all_ids:
-                report["errors"].append({"code": "unknown_page_dependency", "path": _relative(base, page), "message": f"Зависимая страница не найдена: {dependency}"})
+                report["errors"].append({"code": "unknown_page_dependency", "path": _relative(base, page), "message": f"Dependent page was not found: {dependency}."})
 
     report["errors"] = list({(item.get("path"), item.get("code"), item.get("message")): item for item in report["errors"]}.values())
     report["warnings"] = list({(item.get("path"), item.get("code"), item.get("message")): item for item in report["warnings"]}.values())
@@ -512,7 +512,7 @@ def _frontmatter_id(text: str, fallback: str) -> str:
 def _searchable_match(text: str, query: str) -> tuple[int, str, str] | None:
     tokens = [token.casefold() for token in re.findall(r"[\w'-]+", query, flags=re.UNICODE) if token]
     if not tokens:
-        raise WikiError("invalid_query", "Поисковый запрос должен содержать текст")
+        raise WikiError("invalid_query", "Search query must contain text.")
     folded = text.casefold()
     if not all(token in folded for token in tokens):
         return None
@@ -536,7 +536,7 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
     """Search Markdown pages and the current registered text source revisions."""
     base = _root(root)
     if not isinstance(query, str) or not query.strip():
-        raise WikiError("invalid_query", "Поисковый запрос должен содержать текст")
+        raise WikiError("invalid_query", "Search query must contain text.")
     from .raw import discover_raw_sources
 
     discover_raw_sources(base)

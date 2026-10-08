@@ -198,7 +198,7 @@ def _run_process(root: Path, config: RunConfig, prompt: str) -> tuple[int, bytes
         process = subprocess.Popen(argv, **kwargs)  # type: ignore[arg-type]
     except (OSError, ValueError) as exc:
         detail = getattr(exc, "strerror", None) or str(exc)
-        raise WikiError("process_error", f"не удалось запустить OpenCode: {detail}") from exc
+        raise WikiError("process_error", f"Failed to start OpenCode: {detail}.") from exc
 
     output = _BoundedOutput(_MAX_OUTPUT_BYTES, process)
     assert process.stdout is not None
@@ -231,12 +231,12 @@ def _run_process(root: Path, config: RunConfig, prompt: str) -> tuple[int, bytes
             stdout_thread.join(timeout=0.5)
             stderr_thread.join(timeout=0.5)
             if stdout_thread.is_alive() or stderr_thread.is_alive():
-                raise WikiError("protocol_error", "поток OpenCode не завершился после закрытия процесса")
+                raise WikiError("protocol_error", "OpenCode stream did not terminate after the process exited.")
         else:
             process.stdout.close()
             process.stderr.close()
     if output.errors:
-        raise WikiError("process_error", "не удалось прочитать вывод OpenCode") from output.errors[0]
+        raise WikiError("process_error", "Failed to read OpenCode output.") from output.errors[0]
     return return_code, bytes(output.stdout), bytes(output.stderr), timed_out, output.overflow.is_set()
 
 
@@ -249,43 +249,43 @@ def _parse_event_stream(raw: bytes) -> dict:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise WikiError("protocol_error", "поток OpenCode содержит невалидный UTF-8") from exc
+        raise WikiError("protocol_error", "OpenCode stream contains invalid UTF-8.") from exc
     if not text:
-        raise WikiError("truncated_output", "OpenCode не вернул поток событий")
+        raise WikiError("truncated_output", "OpenCode returned an empty event stream.")
     if not text.endswith("\n"):
-        raise WikiError("truncated_output", "последняя строка потока OpenCode оборвана")
+        raise WikiError("truncated_output", "The final line of the OpenCode stream is truncated.")
 
     events: list[dict] = []
     session_id: str | None = None
     for line_number, line in enumerate(text.splitlines(), start=1):
         if not line:
-            raise WikiError("protocol_error", f"пустая строка в потоке OpenCode ({line_number})")
+            raise WikiError("protocol_error", f"OpenCode stream contains an empty line ({line_number}).")
         try:
             item = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise WikiError("protocol_error", f"строка {line_number} потока OpenCode не является JSON") from exc
+            raise WikiError("protocol_error", f"OpenCode stream line {line_number} is not valid JSON.") from exc
         if not isinstance(item, dict):
-            raise WikiError("protocol_error", f"событие OpenCode в строке {line_number} должно быть JSON-объектом")
+            raise WikiError("protocol_error", f"OpenCode event on line {line_number} must be a JSON object.")
         event_type = item.get("type")
         if event_type not in {"step_start", "step_finish", "text", "tool_use", "error"}:
-            raise WikiError("protocol_error", f"неизвестный тип события OpenCode в строке {line_number}")
+            raise WikiError("protocol_error", f"Unknown OpenCode event type on line {line_number}.")
         current_session = item.get("sessionID")
         if not isinstance(current_session, str) or not current_session:
-            raise WikiError("protocol_error", f"событие OpenCode в строке {line_number} без sessionID")
+            raise WikiError("protocol_error", f"OpenCode event on line {line_number} has no sessionID.")
         if session_id is None:
             session_id = current_session
         elif current_session != session_id:
-            raise WikiError("protocol_error", "поток OpenCode содержит более одной сессии")
+            raise WikiError("protocol_error", "OpenCode stream contains more than one session.")
 
         if event_type == "error":
             details = json.dumps(item.get("error", {}), ensure_ascii=False)
             code = "auth_error" if _auth_error(details) else "opencode_error"
-            message = "провайдер отклонил авторизацию OpenCode" if code == "auth_error" else "OpenCode сообщил об ошибке"
+            message = "OpenCode provider rejected authorization." if code == "auth_error" else "OpenCode reported an error."
             raise WikiError(code, message)
 
         part = item.get("part")
         if not isinstance(part, dict) or not isinstance(part.get("messageID"), str):
-            raise WikiError("protocol_error", f"событие OpenCode в строке {line_number} не содержит messageID")
+            raise WikiError("protocol_error", f"OpenCode event on line {line_number} has no messageID.")
         expected_part_type = {
             "step_start": "step-start",
             "step_finish": "step-finish",
@@ -293,21 +293,21 @@ def _parse_event_stream(raw: bytes) -> dict:
             "tool_use": "tool",
         }[event_type]
         if part.get("type") != expected_part_type:
-            raise WikiError("protocol_error", f"несогласованный тип части OpenCode в строке {line_number}")
+            raise WikiError("protocol_error", f"OpenCode part type is inconsistent on line {line_number}.")
         if event_type == "text":
             if not isinstance(part.get("text"), str) or not isinstance(part.get("time"), dict) or part["time"].get("end") is None:
-                raise WikiError("protocol_error", f"неполный текстовый фрагмент OpenCode в строке {line_number}")
+                raise WikiError("protocol_error", f"OpenCode text fragment is incomplete on line {line_number}.")
         if event_type == "step_finish" and not isinstance(part.get("reason"), str):
-            raise WikiError("protocol_error", f"событие завершения OpenCode в строке {line_number} без reason")
+            raise WikiError("protocol_error", f"OpenCode step-finish event on line {line_number} has no reason.")
         events.append(item)
 
     if not events or not any(item["type"] == "step_start" for item in events):
-        raise WikiError("truncated_output", "в потоке OpenCode нет начала шага")
+        raise WikiError("truncated_output", "OpenCode stream has no step start.")
     if events[-1]["type"] != "step_finish":
-        raise WikiError("truncated_output", "поток OpenCode завершился до окончания шага")
+        raise WikiError("truncated_output", "OpenCode stream ended before the step finished.")
     final = events[-1]["part"]
     if final.get("reason") != "stop":
-        raise WikiError("truncated_output", "последний шаг OpenCode не завершился обычным ответом")
+        raise WikiError("truncated_output", "The last OpenCode step did not end with a normal response.")
 
     final_message = final["messageID"]
     fragments = [
@@ -316,7 +316,7 @@ def _parse_event_stream(raw: bytes) -> dict:
         if item["type"] == "text" and item["part"]["messageID"] == final_message
     ]
     if not fragments:
-        raise WikiError("answer_validation_error", "последний шаг OpenCode не содержит ответа")
+        raise WikiError("answer_validation_error", "The last OpenCode step contains no answer.")
     response = "".join(fragments).strip()
     if response.startswith("```") and response.endswith("```"):
         first_line, _, remainder = response.partition("\n")
@@ -325,9 +325,9 @@ def _parse_event_stream(raw: bytes) -> dict:
     try:
         result = json.loads(response)
     except json.JSONDecodeError as exc:
-        raise WikiError("answer_validation_error", "итоговый текст OpenCode не является JSON-ответом") from exc
+        raise WikiError("answer_validation_error", "OpenCode's final text is not a JSON answer.") from exc
     if not isinstance(result, dict):
-        raise WikiError("answer_validation_error", "итоговый JSON OpenCode должен быть объектом")
+        raise WikiError("answer_validation_error", "OpenCode's final JSON must be an object.")
     return result
 
 
@@ -335,27 +335,27 @@ def run_opencode(root: Path, config: RunConfig, prompt: str) -> dict:
     """Run one fresh OpenCode session and return only its final JSON object."""
     root = Path(root)
     if not root.is_absolute():
-        raise WikiError("configuration_error", "корень wiki должен быть абсолютным путём")
+        raise WikiError("configuration_error", "Wiki root must be an absolute path.")
     try:
         root = root.resolve(strict=True)
     except OSError as exc:
-        raise WikiError("configuration_error", f"не удалось открыть корень wiki: {exc}") from exc
+        raise WikiError("configuration_error", f"Failed to open the wiki root: {exc}.") from exc
     if not root.is_dir() or config.root.resolve() != root:
-        raise WikiError("configuration_error", "корень запуска не совпадает с корнем настроек")
+        raise WikiError("configuration_error", "The run root does not match the configured wiki root.")
     if not isinstance(prompt, str) or not prompt.strip():
-        raise WikiError("argument_error", "промпт должен быть непустой строкой")
+        raise WikiError("argument_error", "The prompt must be a non-empty string.")
 
     return_code, stdout, stderr, timed_out, output_limited = _run_process(root, config, prompt)
     if timed_out:
-        raise WikiError("timeout_error", f"OpenCode превысил таймаут {config.timeout_seconds} с; процесс остановлен")
+        raise WikiError("timeout_error", f"OpenCode exceeded the {config.timeout_seconds}-second timeout; the process was stopped.")
     if output_limited:
-        raise WikiError("output_limit_error", "вывод OpenCode превысил допустимый размер")
+        raise WikiError("output_limit_error", "OpenCode output exceeded the size limit.")
     diagnostics = stderr.decode("utf-8", errors="replace")
     output_text = stdout.decode("utf-8", errors="replace")
     if return_code != 0:
         if _auth_error(diagnostics + "\n" + output_text):
-            raise WikiError("auth_error", "провайдер OpenCode отклонил авторизацию")
-        raise WikiError("process_error", f"OpenCode завершился с кодом {return_code}")
+            raise WikiError("auth_error", "OpenCode provider rejected authorization.")
+        raise WikiError("process_error", f"OpenCode exited with code {return_code}.")
     return _parse_event_stream(stdout)
 
 
@@ -364,11 +364,11 @@ def _knowledge_revision(root: Path) -> str:
     for area in ("wiki", "sources"):
         base = root / area
         if base.is_symlink():
-            raise WikiError("configuration_error", f"каталог {area} не должен быть symlink")
+            raise WikiError("configuration_error", f"The {area} directory must not be a symlink.")
         if not base.exists():
             continue
         if not base.is_dir():
-            raise WikiError("configuration_error", f"путь {area} должен быть каталогом")
+            raise WikiError("configuration_error", f"The {area} path must be a directory.")
         for directory, subdirs, filenames in os.walk(base, followlinks=False):
             subdirs.sort()
             filenames.sort()
@@ -383,7 +383,7 @@ def _knowledge_revision(root: Path) -> str:
                     if area == "sources" and path.is_relative_to(raw_directory):
                         subdirs.remove(name)
                         continue
-                    raise WikiError("configuration_error", f"symlink внутри {area} не поддерживается")
+                    raise WikiError("configuration_error", f"Symlinks inside {area} are not supported.")
             for name in filenames:
                 path = current / name
                 relative_path = path.relative_to(root).as_posix()
@@ -393,14 +393,14 @@ def _knowledge_revision(root: Path) -> str:
                 if path.is_symlink():
                     if in_raw:
                         continue
-                    raise WikiError("configuration_error", f"необычный файл знаний: {path.relative_to(root)}")
+                    raise WikiError("configuration_error", f"Unexpected knowledge file: {path.relative_to(root)}.")
                 if not path.is_file():
-                    raise WikiError("configuration_error", f"необычный файл знаний: {path.relative_to(root)}")
+                    raise WikiError("configuration_error", f"Unexpected knowledge file: {path.relative_to(root)}.")
                 relative = path.relative_to(root).as_posix().encode("utf-8")
                 try:
                     content = path.read_bytes()
                 except OSError as exc:
-                    raise WikiError("state_error", f"не удалось прочитать файл знаний {path.relative_to(root)}") from exc
+                    raise WikiError("state_error", f"Failed to read knowledge file {path.relative_to(root)}.") from exc
                 digest.update(len(relative).to_bytes(8, "big"))
                 digest.update(relative)
                 digest.update(len(content).to_bytes(8, "big"))
@@ -410,20 +410,20 @@ def _knowledge_revision(root: Path) -> str:
 
 def _validate_request(request: object) -> dict:
     if not isinstance(request, dict):
-        raise WikiError("argument_error", "запрос должен быть JSON-объектом")
+        raise WikiError("argument_error", "The request must be a JSON object.")
     if set(request) - {"question", "scope"}:
-        raise WikiError("argument_error", "запрос может содержать только question и scope")
+        raise WikiError("argument_error", "The request may contain only question and scope.")
     question = request.get("question")
     if not isinstance(question, str) or not question.strip():
-        raise WikiError("argument_error", "question должен быть непустой строкой")
+        raise WikiError("argument_error", "The question must be a non-empty string.")
     scope = request.get("scope", {})
     if not isinstance(scope, dict) or set(scope) - {"process", "product", "environment", "version"}:
-        raise WikiError("argument_error", "scope должен содержать только process, product, environment и version")
+        raise WikiError("argument_error", "Scope may contain only process, product, environment, and version.")
     clean_scope: dict[str, str | None] = {}
     for key in ("process", "product", "environment", "version"):
         value = scope.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise WikiError("argument_error", f"scope.{key} должен быть непустой строкой или null")
+            raise WikiError("argument_error", f"The scope.{key} value must be a non-empty string or null.")
         clean_scope[key] = value
     return {"question": question, "scope": clean_scope}
 
@@ -431,46 +431,46 @@ def _validate_request(request: object) -> dict:
 def _validate_answer(root: Path, answer: object) -> dict:
     required = {"scope", "summary", "claims", "citations", "gaps", "conflicts"}
     if not isinstance(answer, dict) or set(answer) != required:
-        raise WikiError("answer_validation_error", "ответ должен содержать только scope, summary, claims, citations, gaps и conflicts")
+        raise WikiError("answer_validation_error", "The answer may contain only scope, summary, claims, citations, gaps, and conflicts.")
     scope = answer["scope"]
     scope_keys = {"process", "product", "environment", "version"}
     if not isinstance(scope, dict) or set(scope) != scope_keys:
-        raise WikiError("answer_validation_error", "scope ответа должен содержать process, product, environment и version")
+        raise WikiError("answer_validation_error", "Answer scope must contain process, product, environment, and version.")
     for key, value in scope.items():
         if value is not None and not isinstance(value, str):
-            raise WikiError("answer_validation_error", f"scope.{key} должен быть строкой или null")
+            raise WikiError("answer_validation_error", f"The scope.{key} value must be a string or null.")
     if not isinstance(answer["summary"], str) or not answer["summary"].strip():
-        raise WikiError("answer_validation_error", "summary ответа должен быть непустой строкой")
+        raise WikiError("answer_validation_error", "Answer summary must be a non-empty string.")
     for key in ("gaps", "conflicts"):
         if not isinstance(answer[key], list) or any(not isinstance(value, str) for value in answer[key]):
-            raise WikiError("answer_validation_error", f"{key} должен быть списком строк")
+            raise WikiError("answer_validation_error", f"The {key} field must be an array of strings.")
 
     citations = answer["citations"]
     if not isinstance(citations, list):
-        raise WikiError("answer_validation_error", "citations должен быть списком")
+        raise WikiError("answer_validation_error", "Citations must be an array.")
     citation_ids: set[str] = set()
     validated_citations: list[dict] = []
     for citation in citations:
         if not isinstance(citation, dict):
-            raise WikiError("answer_validation_error", "каждая citation должна быть JSON-объектом")
+            raise WikiError("answer_validation_error", "Each citation must be a JSON object.")
         allowed_keys = {"citation_id", "source_id", "revision", "locator", "wiki_page"}
         if set(citation) - allowed_keys or not {"citation_id", "source_id", "revision", "locator"}.issubset(citation):
-            raise WikiError("answer_validation_error", "citation должна содержать citation_id, source_id, revision и locator")
+            raise WikiError("answer_validation_error", "Citation must contain citation_id, source_id, revision, and locator.")
         citation_id = citation["citation_id"]
         source_id = citation["source_id"]
         revision = citation["revision"]
         locator = citation["locator"]
         wiki_page = citation.get("wiki_page")
         if not isinstance(citation_id, str) or not _CLAIM_ID.fullmatch(citation_id) or citation_id in citation_ids:
-            raise WikiError("answer_validation_error", "citation_id должен быть уникальным безопасным идентификатором")
+            raise WikiError("answer_validation_error", "The citation_id field must be a unique safe identifier.")
         if not isinstance(source_id, str) or not _SOURCE_ID.fullmatch(source_id):
-            raise WikiError("answer_validation_error", "source_id в citation должен быть безопасным ASCII slug")
+            raise WikiError("answer_validation_error", "The source_id in a citation must be a safe ASCII slug.")
         if not isinstance(revision, str) or not _CONTENT_ID.fullmatch(revision):
-            raise WikiError("answer_validation_error", "revision в citation должен быть SHA-256 в нижнем регистре")
+            raise WikiError("answer_validation_error", "The revision in a citation must be a lowercase SHA-256 value.")
         if not isinstance(locator, str) or not locator:
-            raise WikiError("answer_validation_error", "locator в citation должен быть непустой строкой")
+            raise WikiError("answer_validation_error", "The locator in a citation must be a non-empty string.")
         if wiki_page is not None and not isinstance(wiki_page, str):
-            raise WikiError("answer_validation_error", "wiki_page должен быть строкой или null")
+            raise WikiError("answer_validation_error", "The wiki_page field must be a string or null.")
         citation_ids.add(citation_id)
         validated_citations.append(
             {
@@ -484,34 +484,34 @@ def _validate_answer(root: Path, answer: object) -> dict:
 
     claims = answer["claims"]
     if not isinstance(claims, list):
-        raise WikiError("answer_validation_error", "claims должен быть списком")
+        raise WikiError("answer_validation_error", "Claims must be an array.")
     claim_ids: set[str] = set()
     for claim in claims:
         if not isinstance(claim, dict) or set(claim) != {"claim_id", "text", "status", "citation_ids"}:
-            raise WikiError("answer_validation_error", "claim должна содержать claim_id, text, status и citation_ids")
+            raise WikiError("answer_validation_error", "Each claim must contain claim_id, text, status, and citation_ids.")
         claim_id = claim["claim_id"]
         claim_text = claim["text"]
         status = claim["status"]
         refs = claim["citation_ids"]
         if not isinstance(claim_id, str) or not _CLAIM_ID.fullmatch(claim_id) or claim_id in claim_ids:
-            raise WikiError("answer_validation_error", "claim_id должен быть уникальным безопасным идентификатором")
+            raise WikiError("answer_validation_error", "The claim_id field must be a unique safe identifier.")
         if not isinstance(claim_text, str) or not claim_text.strip():
-            raise WikiError("answer_validation_error", "text утверждения должен быть непустой строкой")
+            raise WikiError("answer_validation_error", "Claim text must be a non-empty string.")
         if not isinstance(status, str) or status not in {"supported", "inferred", "conflicted", "unknown"}:
-            raise WikiError("answer_validation_error", "status утверждения не поддерживается")
+            raise WikiError("answer_validation_error", "Claim status is not supported.")
         if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs) or len(set(refs)) != len(refs):
-            raise WikiError("answer_validation_error", "citation_ids должен быть списком уникальных строк")
+            raise WikiError("answer_validation_error", "The citation_ids field must be an array of unique strings.")
         if any(ref not in citation_ids for ref in refs):
-            raise WikiError("answer_validation_error", "claim ссылается на отсутствующую citation")
+            raise WikiError("answer_validation_error", "Claim refers to a missing citation.")
         if status != "unknown" and not refs:
-            raise WikiError("answer_validation_error", f"утверждение со статусом {status} должно иметь citation")
+            raise WikiError("answer_validation_error", f"A claim with status {status} must have a citation.")
         claim_ids.add(claim_id)
 
     if validated_citations:
         try:
             from .knowledge import validate_source_reference
         except ImportError as exc:
-            raise WikiError("answer_validation_error", "проверка ссылок на источники недоступна") from exc
+            raise WikiError("answer_validation_error", "Source reference validation is unavailable.") from exc
         for citation in validated_citations:
             try:
                 validate_source_reference(
@@ -522,7 +522,7 @@ def _validate_answer(root: Path, answer: object) -> dict:
                     citation["wiki_page"],
                 )
             except WikiError as exc:
-                raise WikiError("answer_validation_error", f"невалидная citation: {exc.message}") from exc
+                raise WikiError("answer_validation_error", f"Invalid citation: {exc.message}.") from exc
 
     return {
         "scope": dict(scope),
@@ -545,9 +545,9 @@ def _write_answer_record(root: Path, answer: dict) -> Path:
                 pass
             info = directory.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise WikiError("state_error", f"путь состояния не должен быть symlink или файлом: {directory.name}")
+                raise WikiError("state_error", f"State path must not be a symlink or file: {directory.name}.")
             if not directory.resolve(strict=True).is_relative_to(root):
-                raise WikiError("state_error", "каталог состояния выходит за пределы корня wiki")
+                raise WikiError("state_error", "State directory must remain within the wiki root.")
 
         answer_path = answer_dir / f"{answer['answer_id']}.json"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -567,7 +567,7 @@ def _write_answer_record(root: Path, answer: dict) -> Path:
     except WikiError:
         raise
     except OSError as exc:
-        raise WikiError("state_error", "не удалось сохранить локальную запись ответа") from exc
+        raise WikiError("state_error", "Failed to save the local answer record.") from exc
 
 
 def ask(root: Path, request: dict) -> dict:
@@ -590,7 +590,7 @@ def ask(root: Path, request: dict) -> dict:
     raw_answer = run_opencode(config.root, config, prompt)
     final_revision = _knowledge_revision(config.root)
     if final_revision != initial_revision:
-        raise WikiError("knowledge_changed", "содержимое wiki или источников изменилось во время запроса")
+        raise WikiError("knowledge_changed", "Wiki or source contents changed during the request.")
     validated = _validate_answer(config.root, raw_answer)
     complete = {
         "answer_id": uuid.uuid4().hex,
