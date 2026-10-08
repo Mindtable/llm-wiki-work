@@ -137,3 +137,34 @@ A job's `resolved` status and a feedback outcome are different statuses. Neither
 ## What Counts as a Passed Check
 
 Structural results, snapshot and hash, manifest, path-based ID, current revision in the chain, `wiki search` result, and number of SQLite records can be checked deterministically. A citation and answer contents, the headless profile's proposal, and its decision can only be checked live with a configured OpenCode model. Record the date, OpenCode version, question, source ID/revision, statuses, and exact locators. Mark live steps that were not performed as not run, not as passed.
+
+## External Research Checkpoints Without a Prior Answer
+
+This scenario checks that an external calling agent can save reusable research without first asking the librarian. Use a temporary repository copy and a separate agent project with the client skill installed. Set `LLM_WIKI_ROOT` to the temporary wiki's absolute path. The source registration, ingestion, and search checks below do not require a configured model.
+
+1. Create a Markdown research note outside `sources/raw/`, for example `/absolute/path/to/notes/project-alpha-refund.md`. Include a stable project ID/name, a research question, date, observations with source URLs and exact versions/locators or short quotes when available, and separate sections for interpretation, uncertainty, and open questions. Record a code commit/path/lines as observed provenance; do not imply that linking a commit proves an independent source check.
+2. Register the note with a project-namespaced ID and origin:
+
+   ```sh
+   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/notes/project-alpha-refund.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --origin research:project-alpha/refund
+   ```
+
+   Capture the returned `source_id` and `revision`. If the exact upstream commit is known, it may be supplied with `--upstream-revision ACTUAL_COMMIT`; do not guess it.
+
+3. Queue that exact revision and save the returned `job_id`:
+
+   ```sh
+   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID ACTUAL_REVISION
+   ```
+
+   Inspect the manifest and snapshot: the kind is `unclassified`, the origin identifies the project/topic, and the snapshot bytes and SHA-256 match the saved note. Check `.state/queue.sqlite3` read-only for exactly one ingest row matching the returned source ID and revision. Search for a unique phrase from the note and confirm the result carries the source ID, revision, and locator.
+
+4. Restart the external agent and repeat registration with the identical note bytes, ID, and origin, then repeat ingestion. The manifest/revision and job ID should be unchanged, with one matching queue row. Edit the note under the same ID, preserving earlier useful observations, and register it again. Queue the newly returned revision:
+
+   ```sh
+   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID NEW_REVISION
+   ```
+
+   Confirm the new revision's `supersedes` points to the previous revision, the prior snapshot remains on disk, exactly one job exists for the new source ID/revision pair, and search retrieves the new current revision. For a second project researching the same topic, use a distinct project namespace and source ID.
+
+5. In an optional live model check, include the project ID/name in the question text. The supported `ask` scope has only `process`, `product`, `environment`, and `version`; there is no `scope.project` or wiki project filter. The `uv --project` flag selects the Python environment only. This retrieval check requires configured OpenCode, a model, and provider authorization; mark it not run until it has actually been exercised. If the note was instead placed in `sources/raw/`, allow the next `ask` or `search` to discover it and do not also run `source add` on the same file.

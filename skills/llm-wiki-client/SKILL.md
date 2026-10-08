@@ -1,11 +1,11 @@
 ---
 name: llm-wiki-client
-description: Use when an agent's assigned coding, investigation, or review task depends on missing or unfamiliar business-process context, uncertain roles or states, conflicting source evidence, or reveals a material mismatch with a previous wiki answer.
+description: Use when an assigned coding, investigation, or review task would benefit from reusable project or domain research, has unfamiliar technical or process context, or reveals a material mismatch with a previous wiki answer.
 ---
 
 # LLM Wiki Client
 
-You have access to LLM Wiki while solving your assigned task. Consult it when business-process context affects the work: for example, when a role, state, condition, procedure, or workflow is unfamiliar or sources conflict. Do not turn every coding task into a wiki query. Form a focused question from the task and known scope; the user does not need to ask for a query or feedback report.
+You have access to LLM Wiki while solving your assigned task. Consult it when relevant project or domain knowledge can affect implementation, investigation, or review—for example, when technical facts, roles, states, conditions, procedures, or source evidence are unfamiliar or conflict. Do not turn every coding task into a wiki query. Form a focused question from the task and known scope; the user does not need to request a query or feedback report.
 
 Use this skill from an external calling agent. The configured Python CLI invokes the headless `librarian`. Native `librarian` and `wiki-maintainer` profiles handle their own task and must not load this client skill or call the CLI recursively.
 
@@ -51,11 +51,41 @@ Optional search can locate terms, but it does not replace the librarian's synthe
 uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" search -- 'review_hold'
 ```
 
-A file newly placed in `sources/raw/` is discovered at the next `ask` or `search`, with no background watcher. Discovery creates an `unclassified` snapshot and ingest job; it does not publish a page. Files outside the wiki are not automatically available to the librarian.
+A file newly placed in `sources/raw/` is discovered at the next `ask` or `search`, with no background watcher. Discovery creates an `unclassified` snapshot and ingest job; it does not publish a page. Files outside the wiki are not automatically available to the librarian. If a note is already in `sources/raw/`, use this automatic route instead of also registering the same file with `source add`.
+
+Project name and ID in the note or question provide context, but do not guarantee strict project scoping. `ask` scope supports only `process`, `product`, `environment`, and `version`; do not add `scope.project` or invent a wiki `--project` option. The `uv --project` flag selects the Python environment only.
+
+## Save new findings
+
+Saving research is separate from asking a question or submitting feedback; a new note needs no `answer_id` and must not fabricate one. At substantive research or decision checkpoints—and before handoff or task completion—save reusable findings. Do not save every tool result or wait until only the final step.
+
+Write a concise Markdown note outside `sources/raw/` with a stable project ID/name (or `general`), the research question, date, observations, source URLs and exact versions/locators/quotes when available, interpretations or hypotheses, limits, and open questions. Keep evidence separate from inference. A linked commit or source URL is provenance; it does not claim the upstream material was independently validated. For code observations, retain the exact observed commit, path, and lines.
+
+Use a separate, namespaced source ID for each independent finding or checkpoint, such as `research-project-alpha-refund-checkpoint-01`. Use an ID such as `research-general-topic-checkpoint-01` when the finding is not project-specific. To revise a cumulative note under the same ID, retain earlier useful findings because default retrieval uses only the current `supersedes` tip.
+
+Register the note from its absolute path. This creates an immutable `unclassified` snapshot and returns its `source_id` and `revision`; registration does not need an LLM and makes the source searchable immediately:
+
+```sh
+uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/project-research.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --origin research:project-alpha/refund
+```
+
+Add `--upstream-revision ACTUAL_COMMIT` only when the exact commit is known. Then queue ingestion with the returned values:
+
+```sh
+uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID ACTUAL_REVISION
+```
+
+Save the exact `source_id`, `revision`, and returned `job_id`. Ingestion is a durable queued job, not verification or publication; no maintenance run is required to save or find the note. Optionally verify by searching for a unique phrase:
+
+```sh
+uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" search -- 'unique phrase from note'
+```
+
+Repeating registration for the current revision with identical bytes returns the same manifest, and repeating ingestion for that source ID and revision reuses the existing job. If a newer revision exists, reimporting historical bytes returns `historical_revision`; it does not roll back the source. Changed current bytes under the same ID create a new snapshot and revision with `supersedes`; the old snapshot remains. If `source add` succeeded but ingestion failed, report the partial result and retry `ingest` with the exact existing source ID and revision, without registering another source. For a distinct project with a similar topic, use a different project namespace. Project names in questions can aid lexical retrieval but do not guarantee strict project scoping.
 
 ## Submit feedback when you find a mismatch
 
-When you find or the user reports a material gap or conflict in the answer, submit a feedback request yourself. Use the exact answer identifiers from that CLI response. Give each distinct request a new safe `feedback_id`; replace the answer placeholders below with actual values before submission. Use `evidence: []` only when no registered source references apply. Otherwise include actual reference objects with `source_id`, `revision`, and `locator`. For code findings not registered in the wiki, record the observed repository commit, path, and lines in `description`; include any real applicable wiki references in `evidence`, and do not invent a source ID. A suggested correction is a hypothesis for review.
+When you find or the user reports a material gap or conflict with a previous wiki answer, submit a feedback request yourself. Use that answer's exact `answer_id` and `wiki_revision`. Give each distinct request a new safe `feedback_id`; replace the answer placeholders below with actual values before submission. Use `evidence: []` only when no registered source references apply. Otherwise include actual reference objects with `source_id`, `revision`, and `locator`. For code findings not registered in the wiki, record the observed repository commit, path, and lines in `description`; include any real applicable wiki references in `evidence`, and do not invent a source ID. A suggested correction is a hypothesis for review.
 
 ```json
 {
@@ -78,6 +108,6 @@ uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" feedback
 
 An identical retry with the same ID and contents returns the existing request; changed contents require a new ID. After `needs_evidence`, send the new evidence as a new request with a new ID and `related_feedback_id`. A `pending` submission is queued. `ready_for_review` means a proposal awaits human review, not that wiki content was published. Only report publication when status is `resolved`, outcome is `proposed`, and `published_revision` is present.
 
-After asking or submitting feedback, continue the original coding, investigation, or review task; do not wait or poll for maintenance. The calling agent cannot edit wiki pages, publish proposals, or run maintenance implicitly. If an unresolved business conflict affects correctness, state the blocker and continue unaffected work rather than silently choosing a role. For an explicitly requested maintenance task, follow the wiki repository's maintainer procedure.
+After asking, saving a note, or submitting feedback, continue the original coding, investigation, or review task; do not wait or poll for maintenance. The calling agent cannot edit wiki pages, publish proposals, or run maintenance implicitly. If an unresolved project or business conflict affects correctness, state the blocker and continue unaffected work rather than silently choosing an interpretation. For an explicitly requested maintenance task, follow the wiki repository's maintainer procedure.
 
 If the CLI reports `configuration_error` because `[ask].model` is unset or empty, surface the setup gap: the wiki owner must configure `provider/model` and provider authorization. Do not invoke `opencode` directly or substitute a model. For other failures, report the actual error code and message. Fix the cause before retrying; do not automatically repeat paid calls.
