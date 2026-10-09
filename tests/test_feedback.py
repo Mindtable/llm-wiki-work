@@ -59,7 +59,14 @@ class FeedbackQueueTests(unittest.TestCase):
 
         incoming = root / "procedure.md"
         incoming.write_text("Start processing only after approval.\n", encoding="utf-8")
-        registered = add_source(root, incoming, source_id="procedure", kind="unclassified", authorship="ai-generated")
+        registered = add_source(
+            root,
+            incoming,
+            source_id="procedure",
+            kind="unclassified",
+            authorship="ai-generated",
+            project="atlas",
+        )
         first = enqueue_ingest(root, "procedure", registered["revision"])
         repeated = enqueue_ingest(root, "procedure", registered["revision"])
         self.assertEqual(first["job_id"], repeated["job_id"])
@@ -69,6 +76,7 @@ class FeedbackQueueTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(queued_payload["authorship"], "ai-generated")
+        self.assertEqual(queued_payload["scope"]["project"], "atlas")
 
 
 if __name__ == "__main__":

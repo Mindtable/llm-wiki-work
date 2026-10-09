@@ -146,7 +146,7 @@ This scenario checks that an external calling agent can save reusable research w
 2. Register the note with a project-namespaced ID and origin:
 
    ```sh
-   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/notes/project-alpha-refund.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --authorship ai-generated --origin research:project-alpha/refund
+   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/notes/project-alpha-refund.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --authorship ai-generated --project project-alpha --origin research:project-alpha/refund
    ```
 
    Capture the returned `source_id` and `revision`. If the exact upstream commit is known, it may be supplied with `--upstream-revision ACTUAL_COMMIT`; do not guess it.
@@ -157,9 +157,9 @@ This scenario checks that an external calling agent can save reusable research w
    uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID ACTUAL_REVISION
    ```
 
-   Inspect the manifest and snapshot: the kind is `unclassified`, authorship is `ai-generated`, the origin identifies the project/topic, and the snapshot bytes and SHA-256 match the saved note. Check `.state/queue.sqlite3` read-only for exactly one ingest row matching the returned source ID and revision. Search for a unique phrase from the note and confirm the result carries the source ID, revision, locator, and a flat `authorship` field.
+   Inspect the manifest and snapshot: the kind is `unclassified`, authorship is `ai-generated`, `scope.project` is `project-alpha`, the origin identifies the project/topic, and the snapshot bytes and SHA-256 match the saved note. Check `.state/queue.sqlite3` read-only for exactly one ingest row matching the returned source ID and revision. Search for a unique phrase from the note and confirm the result carries the source ID, revision, locator, and a flat `authorship` field.
 
-4. Restart the external agent and repeat registration with the identical note bytes, ID, origin, and `--authorship ai-generated`, then repeat ingestion. The manifest/revision and job ID should be unchanged, with one matching queue row. Repeat the registration without `--authorship`; it should preserve the recorded value. Edit the note under the same ID, preserving earlier useful observations, and register it again with `--authorship ai-generated`. Queue the newly returned revision:
+4. Restart the external agent and repeat registration with the identical note bytes, ID, origin, `--authorship ai-generated`, and `--project project-alpha`, then repeat ingestion. The manifest/revision and job ID should be unchanged, with one matching queue row. Repeat registration without `--authorship` and `--project`; it should preserve both recorded values. Edit the note under the same ID, preserving earlier useful observations, and register it again with `--authorship ai-generated --project project-alpha`. Queue the newly returned revision:
 
    ```sh
    uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID NEW_REVISION
@@ -167,13 +167,13 @@ This scenario checks that an external calling agent can save reusable research w
 
    Confirm the new revision's `supersedes` points to the previous revision, the prior snapshot remains on disk, exactly one job exists for the new source ID/revision pair, and search retrieves the new current revision. For a second project researching the same topic, use a distinct project namespace and source ID.
 
-5. In an optional live model check, include the project ID/name in the question text. The supported `ask` scope has only `process`, `product`, `environment`, and `version`; there is no `scope.project` or wiki project filter. The `uv --project` flag selects the Python environment only. This retrieval check requires configured OpenCode, a model, and provider authorization; mark it not run until it has actually been exercised. If the note was instead placed in `sources/raw/ai-generated/`, allow the next `ask` or `search` to discover it and do not also run `source add` on the same file.
+5. In an optional live model check, ask with `--project project-alpha` or provide the same ID as `scope.project` in the request. Expect only project-alpha and general sources/pages, with project-alpha first, and `scope.project` pinned to `project-alpha` in the answer. The `uv --project` flag still selects only the Python environment. Mark this check not run until it has actually been exercised. If the note was instead placed in `sources/raw/ai-generated/projects/project-alpha/`, allow the next `ask` or `search` to discover it and do not also run `source add` on the same file.
 
 ## Source Authorship Labels
 
 Use a disposable repository copy. These checks verify declared provenance, not a detector of who wrote the text.
 
-1. Create two test fixtures with identical UTF-8 contents and a unique search phrase, one under `sources/raw/ai-generated/project-alpha/` and one under `sources/raw/human-written/project-alpha/`. Their folder labels are test inputs, not claims about real-world authorship. Create two more copies directly under `sources/raw/` and under `sources/raw/project-alpha/`. Trigger ordinary `wiki search` for the phrase. Check the manifests and search results: the first pair must have `authorship: ai-generated` and `authorship: human-written`, while the other paths must be `unknown`. All four sources may remain `kind: unclassified`; kind and authorship are independent. Folder placement is a declaration, not verification.
+1. Create two test fixtures with identical UTF-8 contents and a unique search phrase, one under `sources/raw/ai-generated/test-bucket/` and one under `sources/raw/human-written/test-bucket/`. Their folder labels are test inputs, not claims about real-world authorship. Create two more copies directly under `sources/raw/` and under `sources/raw/project-alpha/`. Trigger ordinary `wiki search` for the phrase. Check the manifests and search results: the first pair must have `authorship: ai-generated` and `authorship: human-written`, while the other paths must be `unknown`. All four sources may remain `kind: unclassified`; kind and authorship are independent. Folder placement is a declaration, not verification.
 2. Confirm each source search result exposes a flat `authorship` field alongside `type: source`. Because the first pair has identical text, their lexical relevance is tied and the human-written result should appear first. For a query where relevance differs, a more relevant result must still rank above a less relevant human-written result. `unknown` must not receive the human-written tie preference.
 3. Use the research-note registration from the previous section, which passes `--authorship ai-generated`. Create one additional explicit source without the option and confirm that a new source defaults to `authorship: unknown`. Register a separate manual source as `human-written`, change its bytes under the same source ID, and register that changed revision without `--authorship`; the new revision should be `unknown` and its `supersedes` should reference the earlier one. Re-register the agent-authored source with the same current bytes and source ID but explicit `--authorship human-written`. Expect `source_metadata_conflict`; verify the existing manifest and snapshot remain unchanged.
 
@@ -181,3 +181,43 @@ Use a disposable repository copy. These checks verify declared provenance, not a
 4. Move a discovered file from the `ai-generated` raw bucket to the `human-written` bucket and run discovery again. The new path should produce a different path-based source ID with `human-written`; the old manifest and snapshot remain `ai-generated`. The move must not relabel or remove the old source. Correcting a label requires an explicit new source version or source ID.
 5. Create a test knowledge page citing the AI-generated source and manually review it. Confirm the source manifest and search/citation metadata still say `ai-generated`; a reviewed page or human approval does not upgrade the source. Do not add an authorship field to page metadata or model-produced citation JSON; Python supplies it from the manifest.
 6. Optional live trust checks require configured OpenCode and a model. Ask about an external fact present only in an AI-generated note: the fact should remain `inferred` or `unknown`, while the limited statement “the note reports X” may be `supported` with a citation. Add an applicable human primary source that conflicts with an AI summary: the answer should give the primary evidence greater weight but preserve the conflict rather than automatically selecting a winner based only on authorship. Copies or rewrites of the same AI material must not count as independent corroboration. Mark these live checks not run until actually exercised.
+
+## Project Scope Routing
+
+Use a separate temporary repository copy. Project IDs are lowercase ASCII slugs. Project scope controls retrieval grouping, not access to the shared repository.
+
+1. Register three UTF-8 notes with the same search topic: one with `--project atlas`, one with `--project beacon`, and a general source without `--project`. Mark agent-written notes with `--authorship ai-generated`; pass `--kind unclassified` for these notes. Include distinct facts in each note, and make the general note a stronger textual match for the chosen query than the Atlas note. Check each manifest's `scope.project` (`atlas`, `beacon`, or `null`) and verify the general note is shared, not copied into each project.
+
+   ```sh
+   uv run --locked wiki --root . source add /tmp/atlas-note.md \
+     --id atlas-refund-01 --kind unclassified --authorship ai-generated --project atlas
+   uv run --locked wiki --root . source add /tmp/beacon-note.md \
+     --id beacon-refund-01 --kind unclassified --authorship ai-generated --project beacon
+   uv run --locked wiki --root . source add /tmp/general-note.md \
+     --id general-refund-01 --kind unclassified --authorship ai-generated
+   ```
+
+   Queue the returned revisions with separate `ingest SOURCE_ID REVISION` calls. Re-register Atlas's identical current bytes with explicit `--project beacon`; expect `source_metadata_conflict` and verify the existing snapshot and manifest remain unchanged. Edit Atlas note content under the same source ID and omit `--project`; the new revision should inherit `atlas`. For a separate test source, edit content under an existing Atlas source ID and register with explicit `--project beacon`; the new revision should be Beacon-scoped. Use a separate source ID for general material; there is no flag to silently clear scope.
+
+2. Search using the same topic:
+
+   ```sh
+   uv run --locked wiki --root . search --project atlas -- refund
+   uv run --locked wiki --root . search -- refund
+   ```
+
+   The scoped result must include Atlas and general sources, exclude Beacon, and place the Atlas group before the stronger-matching general result. The unscoped result must include all three groups and place general sources first. Scope group priority comes before textual relevance; the existing score and authorship tie-breaks apply within each group.
+
+3. Create a legacy fixture manifest that lacks `scope.project`. Search and scoped ask should treat it as general (`null`) without rewriting the manifest. For raw discovery, test these paths: `sources/raw/ai-generated/projects/atlas/...` (Atlas + AI), `sources/raw/human-written/projects/atlas/...` (Atlas + human), `sources/raw/projects/atlas/...` (Atlas + unknown authorship), and another path such as `sources/raw/ideas/...` (general). A repeated discovery of an already registered revision preserves its stored project, including legacy `null`; changing its contents may initialize the new revision from the recognized project folder. Moving the file changes its path-based ID and creates a separate source.
+
+4. In an optional live check, ask `wiki ask --project atlas "What does the refund brainstorm say?"`. Confirm the answer has `scope.project: atlas`, citations identify only Atlas or general sources, and each citation's `project` matches its verified source manifest. Ask about a Beacon-only fact under Atlas; the answer must not cite Beacon and should report a gap if the permitted inventory does not support the fact. For an unscoped ask, the answer may use any project but must qualify project-specific findings. Mark live checks not run until exercised with a configured model.
+
+5. Check flag/request mismatch with an ask request whose `scope.project` is `beacon`:
+
+   ```sh
+   uv run --locked wiki --root . ask --project atlas --request /path/to/beacon-request.json
+   ```
+
+   Expect an error and no answer because the flag and request project differ. The natural `ask --project atlas "question"` form is also supported; use `--` when question text begins with an option-like token.
+
+6. Create an existing Atlas knowledge page with `scope: {"project": "atlas"}` and `source_refs` to Atlas and general sources, plus a general page on the same topic with only general source refs. Run an Atlas maintenance job. Confirm the proposal preserves the Atlas page's scope and leaves the general page unchanged; it must not target a page scoped to another project. A general page may cite only general source refs. `wiki/index.md` and `wiki/log.md` may link across projects but do not count as evidence for a scoped answer.

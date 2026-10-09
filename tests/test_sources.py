@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import hashlib
 import json
 import threading
 import unittest
@@ -240,6 +241,136 @@ class SourceRegistryTests(unittest.TestCase):
                 with self.assertRaises(WikiError) as caught:
                     add_source(root, incoming, source_id="source", kind="unclassified", default_authorship=invalid)
                 self.assertEqual(caught.exception.code, "invalid_authorship")
+
+    def test_project_ids_are_lowercase_ascii_slugs_and_project_matches_include_general(self):
+        self.assertIsNone(sources_module.validate_project(None))
+        self.assertEqual(sources_module.validate_project("atlas"), "atlas")
+        self.assertEqual(sources_module.validate_project("team-2"), "team-2")
+        for invalid in ("", "Atlas", "two words", "a/b", 3, [], {}):
+            with self.subTest(project=invalid):
+                with self.assertRaises(WikiError) as caught:
+                    sources_module.validate_project(invalid)
+                self.assertEqual(caught.exception.code, "invalid_project")
+
+        self.assertTrue(sources_module.project_matches("atlas", None))
+        self.assertTrue(sources_module.project_matches(None, "atlas"))
+        self.assertTrue(sources_module.project_matches("atlas", "atlas"))
+        self.assertFalse(sources_module.project_matches("atlas", "borealis"))
+
+    def test_source_project_validates_manifest_scope_and_legacy_scope_fields(self):
+        self.assertIsNone(sources_module.source_project({}))
+        self.assertIsNone(sources_module.source_project({"scope": {}}))
+        self.assertEqual(
+            sources_module.source_project({"scope": {"project": "atlas", "region": "eu"}}),
+            "atlas",
+        )
+        for scope in (None, "atlas", []):
+            with self.subTest(scope=scope):
+                with self.assertRaises(WikiError) as caught:
+                    sources_module.source_project({"scope": scope})
+                self.assertEqual(caught.exception.code, "invalid_manifest")
+        for project in ("Atlas", "a/b", 8, [], {}):
+            with self.subTest(project=project):
+                with self.assertRaises(WikiError) as caught:
+                    sources_module.source_project({"scope": {"project": project}})
+                self.assertEqual(caught.exception.code, "invalid_manifest")
+
+        root = self.make_root()
+        incoming = root / "legacy.md"
+        incoming.write_text("Legacy source.\n", encoding="utf-8")
+        registered = add_source(root, incoming, source_id="legacy-project", kind="unclassified")
+        manifest_path = root / "sources" / "manifests" / f"legacy-project--{registered['revision']}.json"
+        legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+        legacy["scope"] = {"region": "eu"}
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+        original = manifest_path.read_bytes()
+
+        loaded = get_manifest(root, "legacy-project", registered["revision"])
+
+        self.assertEqual(loaded["scope"], {"region": "eu", "project": None})
+        self.assertEqual(sources_module.source_project(loaded), None)
+        self.assertEqual(manifest_path.read_bytes(), original)
+
+    def test_project_persists_per_revision_inherits_on_content_change_and_conflicts_are_immutable(self):
+        root = self.make_root()
+        incoming = root / "project.md"
+        incoming.write_text("Original idea.\n", encoding="utf-8")
+        first = add_source(root, incoming, source_id="project-idea", kind="unclassified", project="atlas")
+        self.assertEqual(first["scope"]["project"], "atlas")
+
+        repeated = add_source(root, incoming, source_id="project-idea", kind="unclassified")
+        self.assertEqual(repeated["scope"]["project"], "atlas")
+        repeated_with_same_project = add_source(
+            root, incoming, source_id="project-idea", kind="unclassified", project="atlas"
+        )
+        self.assertEqual(repeated_with_same_project["scope"]["project"], "atlas")
+        manifest_path = root / "sources" / "manifests" / f"project-idea--{first['revision']}.json"
+        snapshot_path = root / first["local_path"]
+        manifest_before = manifest_path.read_bytes()
+        snapshot_before = snapshot_path.read_bytes()
+        with self.assertRaises(WikiError) as caught:
+            add_source(root, incoming, source_id="project-idea", kind="unclassified", project="borealis")
+        self.assertEqual(caught.exception.code, "source_metadata_conflict")
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self.assertEqual(snapshot_path.read_bytes(), snapshot_before)
+
+        incoming.write_text("Revised idea.\n", encoding="utf-8")
+        inherited = add_source(root, incoming, source_id="project-idea", kind="unclassified")
+        self.assertNotEqual(inherited["revision"], first["revision"])
+        self.assertEqual(inherited["supersedes"], first["revision"])
+        self.assertEqual(inherited["scope"]["project"], "atlas")
+
+        incoming.write_text("Raw bucket declaration.\n", encoding="utf-8")
+        bucket_default = add_source(
+            root,
+            incoming,
+            source_id="project-idea",
+            kind="unclassified",
+            default_project="borealis",
+        )
+        self.assertEqual(bucket_default["scope"]["project"], "borealis")
+
+        incoming.write_text("New global material.\n", encoding="utf-8")
+        new_id = add_source(root, incoming, source_id="global-note", kind="unclassified")
+        self.assertIsNone(new_id["scope"]["project"])
+
+    def test_project_and_default_project_reject_invalid_values(self):
+        root = self.make_root()
+        incoming = root / "source.md"
+        incoming.write_text("Source.\n", encoding="utf-8")
+        for argument in ("project", "default_project"):
+            for invalid in ("Atlas", "two words", 2, [], {}):
+                with self.subTest(argument=argument, project=invalid):
+                    with self.assertRaises(WikiError) as caught:
+                        add_source(
+                            root,
+                            incoming,
+                            source_id="source",
+                            kind="unclassified",
+                            **{argument: invalid},
+                        )
+                    self.assertEqual(caught.exception.code, "invalid_project")
+
+    def test_invalid_previous_project_metadata_does_not_leave_new_snapshot(self):
+        root = self.make_root()
+        incoming = root / "source.md"
+        incoming.write_text("Original project record.\n", encoding="utf-8")
+        first = add_source(root, incoming, source_id="project-record", kind="unclassified", project="atlas")
+        manifest_path = root / "sources" / "manifests" / f"project-record--{first['revision']}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["scope"]["project"] = "Atlas"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        incoming.write_text("Changed content with invalid previous scope.\n", encoding="utf-8")
+        next_revision = hashlib.sha256(incoming.read_bytes()).hexdigest()
+        next_snapshot = root / "sources" / "raw" / "project-record" / f"{next_revision}.md"
+        next_manifest = root / "sources" / "manifests" / f"project-record--{next_revision}.json"
+        with self.assertRaises(WikiError) as caught:
+            add_source(root, incoming, source_id="project-record", kind="unclassified")
+
+        self.assertEqual(caught.exception.code, "invalid_manifest")
+        self.assertFalse(next_snapshot.exists())
+        self.assertFalse(next_manifest.exists())
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from typing import Any, TextIO
 from .config import load_config
 from .errors import WikiError
 from .runner import ask, run_opencode
-from .sources import SOURCE_AUTHORSHIPS, SOURCE_KINDS
+from .sources import SOURCE_AUTHORSHIPS, SOURCE_KINDS, validate_project
 
 
 class _HelpRequested(Exception):
@@ -57,6 +57,7 @@ def _build_parser() -> _JsonArgumentParser:
         default=None,
         help="Authorship label for this source revision.",
     )
+    source_add.add_argument("--project", help="Project slug for this source revision.")
 
     ingest = commands.add_parser("ingest", help="Queue a source for ingestion.")
     ingest.add_argument("source_id")
@@ -64,9 +65,12 @@ def _build_parser() -> _JsonArgumentParser:
 
     search = commands.add_parser("search", help="Search current wiki pages.")
     search.add_argument("query", nargs="+", help="Words or a phrase to search for.")
+    search.add_argument("--project", help="Project slug; general sources remain visible.")
 
     ask_parser = commands.add_parser("ask", help="Ask the configured librarian.")
     ask_parser.add_argument("--request", dest="request_file", type=Path, help="JSON file with question and optional scope.")
+    ask_parser.add_argument("--project", help="Project slug to add to request scope.")
+    ask_parser.add_argument("question", nargs=argparse.REMAINDER, help="Literal question text.")
 
     feedback = commands.add_parser("feedback", help="Submit and check feedback.")
     feedback_commands = feedback.add_subparsers(dest="feedback_command", required=True)
@@ -110,11 +114,25 @@ def _parse_args(parser: _JsonArgumentParser, argv: list[str]) -> argparse.Namesp
     if command_index is not None and argv[command_index] == "ask":
         tail = argv[command_index + 1 :]
         option_request = bool(tail) and (tail[0] == "--request" or tail[0].startswith("--request="))
+        option_project = bool(tail) and (tail[0] == "--project" or tail[0].startswith("--project="))
         option_help = bool(tail) and tail[0] in {"-h", "--help"}
-        if tail and not option_request and not option_help:
-            question = tail[1:] if tail[0] == "--" else tail
+        if tail and tail[0] == "--":
             args = parser.parse_args(argv[: command_index + 1])
-            args.question = question
+            args.question = tail[1:]
+            return args
+        if tail and (option_request or option_project or option_help):
+            if "--" in tail:
+                separator = tail.index("--")
+                option_argv = argv[: command_index + 1] + tail[:separator]
+                args = parser.parse_args(option_argv)
+                args.question = tail[separator + 1 :]
+                return args
+            args = parser.parse_args(argv)
+            args.question = getattr(args, "question", [])
+            return args
+        if tail:
+            args = parser.parse_args(argv[: command_index + 1])
+            args.question = tail
             return args
         args = parser.parse_args(argv)
         args.question = []
@@ -173,6 +191,7 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
             origin=args.origin,
             upstream_revision=args.upstream_revision,
             authorship=args.authorship,
+            project=validate_project(args.project),
         )
     if args.command == "ingest":
         from .feedback import enqueue_ingest
@@ -181,8 +200,9 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
     if args.command == "search":
         from .knowledge import search
 
-        return search(root, " ".join(args.query))
+        return search(root, " ".join(args.query), project=validate_project(args.project))
     if args.command == "ask":
+        selected_project = validate_project(args.project)
         if args.request_file is not None:
             if args.question:
                 raise WikiError("argument_error", "Use either --request or a question on the command line.")
@@ -193,6 +213,18 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
             if not question.strip():
                 raise WikiError("argument_error", "Provide a question positionally or use --request FILE.")
             request = {"question": question}
+        if "scope" in request:
+            scope = request["scope"]
+            if not isinstance(scope, dict):
+                raise WikiError("argument_error", "Request scope must be a JSON object.")
+        else:
+            scope = {}
+        scope_project = validate_project(scope.get("project"))
+        if selected_project is not None:
+            if scope_project is not None and scope_project != selected_project:
+                raise WikiError("argument_error", "The --project value conflicts with request scope.project.")
+            scope["project"] = selected_project
+            request["scope"] = scope
         return ask(root, request)
     if args.command == "feedback" and args.feedback_command == "submit":
         from .feedback import submit_feedback

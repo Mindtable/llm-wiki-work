@@ -20,6 +20,7 @@ SOURCE_AUTHORSHIPS = {"human-written", "ai-generated", "unknown"}
 SOURCE_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 REVISION_RE = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9]{1,12}\Z")
+PROJECT_ID_RE = SOURCE_ID_RE
 
 
 def source_authorship(manifest: dict[str, Any]) -> str:
@@ -32,6 +33,32 @@ def source_authorship(manifest: dict[str, Any]) -> str:
     if not isinstance(authorship, str) or authorship not in SOURCE_AUTHORSHIPS:
         raise WikiError("invalid_manifest", "Manifest authorship must be human-written, ai-generated, or unknown.")
     return authorship
+
+
+def validate_project(value: str | None, *, error_code: str = "invalid_project") -> str | None:
+    """Validate an optional stable, lowercase project slug without coercion."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not PROJECT_ID_RE.fullmatch(value):
+        raise WikiError(error_code, "Project must be a lowercase ASCII slug such as 'atlas'.")
+    return value
+
+
+def source_project(manifest: dict[str, Any]) -> str | None:
+    """Read and validate the optional project scope stored on a source manifest."""
+    if not isinstance(manifest, dict):
+        raise WikiError("invalid_manifest", "Manifest must be a JSON object.")
+    if "scope" not in manifest:
+        return None
+    scope = manifest["scope"]
+    if not isinstance(scope, dict):
+        raise WikiError("invalid_manifest", "Manifest scope must be a JSON object.")
+    return validate_project(scope.get("project"), error_code="invalid_manifest")
+
+
+def project_matches(candidate: str | None, requested: str | None) -> bool:
+    """Match a selected project while keeping unassigned sources generally visible."""
+    return requested is None or candidate is None or candidate == requested
 
 
 def _root_path(root: Path) -> Path:
@@ -113,6 +140,11 @@ def get_manifest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
     if manifest.get("sha256") != revision:
         raise WikiError("invalid_manifest", f"sha256 does not match revision in manifest {path.name}.")
     manifest["authorship"] = source_authorship(manifest)
+    project = source_project(manifest)
+    scope = manifest.get("scope")
+    normalized_scope = dict(scope) if isinstance(scope, dict) else {}
+    normalized_scope["project"] = project
+    manifest["scope"] = normalized_scope
     if not isinstance(manifest.get("kind"), str) or manifest.get("kind") not in SOURCE_KINDS:
         raise WikiError("invalid_manifest", f"Invalid kind in manifest {path.name}.")
     if not isinstance(manifest.get("origin"), str) or not isinstance(manifest.get("upstream_revision"), str):
@@ -199,6 +231,8 @@ def add_source(
     upstream_revision: str = "",
     authorship: str | None = None,
     default_authorship: str = "unknown",
+    project: str | None = None,
+    default_project: str | None = None,
 ) -> dict[str, Any]:
     """Register a new immutable source snapshot or reuse an identical one."""
     if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
@@ -209,6 +243,8 @@ def add_source(
         raise WikiError("invalid_authorship", "authorship must be human-written, ai-generated, or unknown.")
     if not isinstance(default_authorship, str) or default_authorship not in SOURCE_AUTHORSHIPS:
         raise WikiError("invalid_authorship", "default_authorship must be human-written, ai-generated, or unknown.")
+    project = validate_project(project)
+    default_project = validate_project(default_project)
     source_path = Path(path).expanduser()
     if not source_path.exists() or not source_path.is_file():
         raise WikiError("source_not_found", f"Source file not found: {source_path}.")
@@ -229,6 +265,8 @@ def add_source(
             upstream_revision,
             authorship,
             default_authorship,
+            project,
+            default_project,
         )
 
 
@@ -242,6 +280,8 @@ def _add_source_locked(
     upstream_revision: str,
     authorship: str | None,
     default_authorship: str,
+    project: str | None,
+    default_project: str | None,
 ) -> dict[str, Any]:
     revision = hashlib.sha256(content).hexdigest()
     ensure_managed_dir(root_path, f"sources/raw/{source_id}")
@@ -269,7 +309,25 @@ def _add_source_locked(
                 "source_metadata_conflict",
                 f"Revision {source_id}@{revision} is already labeled {persisted_authorship}; create a new revision to change authorship.",
             )
+        persisted_project = source_project(validated)
+        if project is not None and project != persisted_project:
+            raise WikiError(
+                "source_metadata_conflict",
+                f"Revision {source_id}@{revision} is already assigned to project {persisted_project}; create a new revision or source ID to change project.",
+            )
         return validated
+
+    existing = _all_source_manifests(root_path, source_id)
+    previous = source_tip(existing)
+    previous_scope: dict[str, Any] = {}
+    previous_project: str | None = None
+    if previous is not None:
+        previous_manifest = get_manifest(root_path, source_id, previous)
+        previous_project = source_project(previous_manifest)
+        previous_scope = dict(previous_manifest["scope"])
+    project_to_save = project if project is not None else default_project if default_project is not None else previous_project
+    scope = previous_scope
+    scope["project"] = project_to_save
 
     if raw_path.exists():
         if raw_path.is_symlink() or not raw_path.is_file() or hashlib.sha256(raw_path.read_bytes()).hexdigest() != revision:
@@ -284,8 +342,6 @@ def _add_source_locked(
         except OSError as exc:
             raise WikiError("source_write_error", f"Failed to save source snapshot: {exc}.") from exc
 
-    existing = _all_source_manifests(root_path, source_id)
-    previous = source_tip(existing)
     captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     manifest = {
         "source_id": source_id,
@@ -297,7 +353,7 @@ def _add_source_locked(
         "sha256": revision,
         "captured_at": captured_at,
         "local_path": raw_relative.as_posix(),
-        "scope": {},
+        "scope": scope,
         "supersedes": previous,
         "derived_from": [],
     }

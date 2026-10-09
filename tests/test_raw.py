@@ -188,6 +188,56 @@ class RawDropTests(unittest.TestCase):
         self.assertEqual(sources_module.source_authorship(changed), "ai-generated")
         self.assertEqual(len(self.jobs()), 2)
 
+    def test_raw_project_layout_is_reserved_and_project_is_stable_across_revisions(self):
+        raw = self.root / "sources" / "raw"
+        project_drop = raw / "ai-generated" / "projects" / "atlas" / "idea.md"
+        global_project_drop = raw / "projects" / "atlas" / "notes.md"
+        other_layout = raw / "other" / "projects" / "atlas" / "unassigned.md"
+        nested_non_layout = raw / "ai-generated" / "ideas" / "projects" / "borealis" / "nested.md"
+        for path, content in (
+            (project_drop, "Project idea.\n"),
+            (global_project_drop, "General project evidence.\n"),
+            (other_layout, "Do not infer from nested directory names.\n"),
+            (nested_non_layout, "Do not infer nested project folder.\n"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        manifests = discover_raw_sources(self.root)
+        by_origin = {manifest["origin"]: manifest for manifest in manifests}
+
+        self.assertEqual(by_origin[project_drop.relative_to(self.root).as_posix()]["scope"]["project"], "atlas")
+        self.assertEqual(by_origin[global_project_drop.relative_to(self.root).as_posix()]["scope"]["project"], "atlas")
+        self.assertEqual(by_origin[other_layout.relative_to(self.root).as_posix()]["scope"]["project"], None)
+        self.assertEqual(by_origin[nested_non_layout.relative_to(self.root).as_posix()]["scope"]["project"], None)
+        self.assertEqual(sources_module.source_authorship(by_origin[project_drop.relative_to(self.root).as_posix()]), "ai-generated")
+        self.assertEqual(sources_module.source_authorship(by_origin[global_project_drop.relative_to(self.root).as_posix()]), "unknown")
+
+        project_manifest = by_origin[project_drop.relative_to(self.root).as_posix()]
+        repeated = discover_raw_sources(self.root)
+        repeated_project = next(item for item in repeated if item["origin"] == project_manifest["origin"])
+        self.assertEqual(repeated_project["revision"], project_manifest["revision"])
+        self.assertEqual(repeated_project["scope"]["project"], "atlas")
+
+        project_drop.write_text("Revised project idea.\n", encoding="utf-8")
+        revised = discover_raw_sources(self.root)
+        revised_project = next(item for item in revised if item["origin"] == project_manifest["origin"])
+        self.assertNotEqual(revised_project["revision"], project_manifest["revision"])
+        self.assertEqual(revised_project["scope"]["project"], "atlas")
+
+    def test_explicit_projects_layout_rejects_missing_or_invalid_slug(self):
+        raw = self.root / "sources" / "raw"
+        missing = raw / "projects" / "not-a-project.md"
+        invalid = raw / "human-written" / "projects" / "Bad Project" / "notes.md"
+        missing.parent.mkdir(parents=True)
+        invalid.parent.mkdir(parents=True)
+        missing.write_text("Missing slug directory.\n", encoding="utf-8")
+        invalid.write_text("Invalid project slug.\n", encoding="utf-8")
+
+        with self.assertRaises(WikiError) as caught:
+            discover_raw_sources(self.root)
+
+        self.assertEqual(caught.exception.code, "invalid_project")
 
 if __name__ == "__main__":
     unittest.main()

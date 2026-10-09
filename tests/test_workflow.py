@@ -272,8 +272,11 @@ class WorkflowIntegrationTests(unittest.TestCase):
         }
         expected_stored_proposal = json.loads(json.dumps(maintenance_proposal))
         self.assertNotIn("authorship", maintenance_proposal["evidence"][0])
+        self.assertNotIn("project", maintenance_proposal["evidence"][0])
         expected_stored_proposal["evidence"][0]["authorship"] = "unknown"
+        expected_stored_proposal["evidence"][0]["project"] = None
         self.assertEqual(expected_stored_proposal["evidence"][0]["authorship"], "unknown")
+        self.assertIsNone(expected_stored_proposal["evidence"][0]["project"])
         responses_path.write_text(
             json.dumps(
                 {

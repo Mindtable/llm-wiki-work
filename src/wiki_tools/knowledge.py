@@ -13,7 +13,19 @@ from typing import Any
 
 from .errors import WikiError
 from .raw import raw_drop_files
-from .sources import REVISION_RE, SOURCE_ID_RE, SOURCE_KINDS, get_manifest, safe_managed_path, source_authorship, source_tip
+from .sources import (
+    REVISION_RE,
+    SOURCE_ID_RE,
+    SOURCE_KINDS,
+    get_manifest,
+    manifest_path,
+    project_matches,
+    safe_managed_path,
+    source_authorship,
+    source_project,
+    source_tip,
+    validate_project,
+)
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".text", ".rst", ".json", ".yaml", ".yml", ".toml", ".py", ".xml", ".bpmn", ".dmn", ".csv", ".tsv", ".html", ".htm", ".log"}
@@ -143,6 +155,15 @@ def _validate_page_metadata(
     def error(code: str, message: str) -> None:
         report["errors"].append({"code": code, "path": rel, "message": message})
 
+    try:
+        scoped_project = page_project(metadata)
+    except WikiError as exc:
+        error(exc.code, exc.message)
+        scoped_project = None
+        scope_valid = False
+    else:
+        scope_valid = True
+
     missing = sorted(REQUIRED_PAGE_FIELDS - metadata.keys())
     if missing:
         error("missing_page_metadata", "Missing fields: " + ", ".join(missing))
@@ -183,6 +204,17 @@ def _validate_page_metadata(
                 error("invalid_source_refs", "Each source reference must contain valid source_id and revision values.")
             elif (source_id, revision) not in source_keys:
                 error("unknown_source_ref", f"Source is not registered: {source_id}@{revision}.")
+            elif scope_valid:
+                try:
+                    manifest = get_manifest(root, source_id, revision)
+                    referenced_project = source_project(manifest)
+                except WikiError as exc:
+                    error("invalid_source_refs", f"Source reference {source_id}@{revision} failed validation: {exc.message}")
+                    continue
+                if scoped_project is None and referenced_project is not None:
+                    error("invalid_source_refs", "A general page cannot reference a project-scoped source.")
+                elif scoped_project is not None and referenced_project not in {None, scoped_project}:
+                    error("invalid_source_refs", "Page project scope must match each scoped source reference.")
 
     dependencies = metadata.get("depends_on")
     if not isinstance(dependencies, list) or any(not isinstance(item, str) or not item for item in dependencies):
@@ -214,6 +246,74 @@ def validate_page_document(root: Path, relative: str, text: str) -> dict[str, An
         errors = "; ".join(f"{item['code']}: {item['message']}" for item in report["errors"])
         raise WikiError("invalid_page_metadata", errors)
     return metadata
+
+
+def page_project(metadata: dict[str, Any], *, error_code: str = "invalid_page_metadata") -> str | None:
+    """Return a page's optional project label, rejecting malformed declarations."""
+    if not isinstance(metadata, dict):
+        raise WikiError(error_code, "Page metadata must be a JSON object.")
+    if "scope" not in metadata:
+        return None
+    scope = metadata["scope"]
+    if not isinstance(scope, dict):
+        raise WikiError(error_code, "scope must be an object.")
+    return validate_project(scope.get("project"), error_code=error_code)
+
+
+def _page_source_refs_match_project(root: Path, metadata: dict[str, Any], project: str | None) -> bool:
+    references = metadata.get("source_refs")
+    if not isinstance(references, list):
+        return False
+    for reference in references:
+        if not isinstance(reference, dict):
+            return False
+        source_id, revision = reference.get("source_id"), reference.get("revision")
+        if not isinstance(source_id, str) or not isinstance(revision, str):
+            return False
+        try:
+            manifest = get_manifest(root, source_id, revision)
+            referenced_project = source_project(manifest)
+        except WikiError:
+            return False
+        if project is None:
+            if referenced_project is not None:
+                return False
+        elif referenced_project not in {None, project}:
+            return False
+    return True
+
+
+def wiki_page_in_project(root: Path, wiki_page: str, project: str | None) -> bool:
+    """Check whether a page and all its source references fit the requested scope."""
+    requested_project = validate_project(project)
+    return _wiki_page_in_scope(root, wiki_page, requested_project, bound=requested_project is not None)
+
+
+def _wiki_page_in_scope(root: Path, wiki_page: str, project: str | None, *, bound: bool) -> bool:
+    """Check a citation page against a bound project, including a bound general scope."""
+    base = _root(root)
+    requested_project = validate_project(project)
+    page_path = validate_wiki_page_reference(base, wiki_page)
+    relative = _relative(base, page_path)
+    if bound and relative in {"wiki/index.md", "wiki/log.md"}:
+        return False
+    try:
+        text = page_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WikiError("invalid_source_reference", f"Failed to read wiki page: {exc}.") from exc
+    metadata, _, parse_error = _parse_frontmatter(text)
+    if parse_error and parse_error != "missing frontmatter delimiter":
+        return False
+    if metadata is None:
+        return True
+    page_scope = page_project(metadata)
+    if not bound:
+        return _page_source_refs_match_project(base, metadata, page_scope)
+    if not project_matches(page_scope, requested_project):
+        return False
+    if requested_project is None and page_scope is not None:
+        return False
+    return _page_source_refs_match_project(base, metadata, page_scope)
 
 
 def _markdown_slug(value: str) -> str:
@@ -401,6 +501,10 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
             source_authorship(record)
         except WikiError as exc:
             report["errors"].append({"code": exc.code, "path": rel, "message": exc.message})
+        try:
+            source_project(record)
+        except WikiError as exc:
+            report["errors"].append({"code": exc.code, "path": rel, "message": exc.message})
         missing = {"source_id", "revision", "kind", "origin", "upstream_revision", "sha256", "captured_at", "local_path", "scope", "supersedes", "derived_from"} - record.keys()
         if missing:
             report["errors"].append({"code": "invalid_manifest", "path": rel, "message": "Missing fields: " + ", ".join(sorted(missing))})
@@ -536,20 +640,35 @@ def _searchable_match(text: str, query: str) -> tuple[int, str, str] | None:
     return score, snippet, locator
 
 
-def search(root: Path, query: str) -> list[dict[str, Any]]:
+def search(root: Path, query: str, *, project: str | None = None) -> list[dict[str, Any]]:
     """Search Markdown pages and the current registered text source revisions."""
     base = _root(root)
     if not isinstance(query, str) or not query.strip():
         raise WikiError("invalid_query", "Search query must contain text.")
+    requested_project = validate_project(project)
     from .raw import discover_raw_sources
 
     discover_raw_sources(base)
     results: list[dict[str, Any]] = []
 
     for path in _walk_files(base, "wiki", {".md"}):
+        relative = _relative(base, path)
+        if requested_project is not None and relative in {"wiki/index.md", "wiki/log.md"}:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            continue
+        metadata, _, parse_error = _parse_frontmatter(text)
+        if parse_error:
+            if parse_error != "missing frontmatter delimiter":
+                continue
+            page_scope = None
+        else:
+            page_scope = page_project(metadata) if metadata is not None else None
+        if not project_matches(page_scope, requested_project):
+            continue
+        if metadata is not None and not _page_source_refs_match_project(base, metadata, page_scope):
             continue
         match = _searchable_match(text, query)
         if match is None:
@@ -559,7 +678,8 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
             "type": "wiki_page",
             "id": _frontmatter_id(text, path.stem),
             "kind": "wiki_page",
-            "path": _relative(base, path),
+            "project": page_scope,
+            "path": relative,
             "revision": None,
             "locator": locator,
             "snippet": snippet,
@@ -579,14 +699,22 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
         record = next((item for item in records if item.get("revision") == current_revision), None)
         if record is None:
             continue
+        record_scope = source_project(record)
+        if not project_matches(record_scope, requested_project):
+            continue
         try:
             manifest = get_manifest(base, source_id, current_revision)
+            source_scope = source_project(manifest)
             local_path = manifest["local_path"]
             snapshot = safe_managed_path(base, local_path)
             if snapshot.suffix.lower() not in TEXT_SUFFIXES:
                 continue
             text = snapshot.read_text(encoding="utf-8")
-        except (WikiError, OSError, UnicodeDecodeError, KeyError):
+        except WikiError as exc:
+            if requested_project is not None and exc.code == "invalid_manifest":
+                raise
+            continue
+        except (OSError, UnicodeDecodeError, KeyError):
             continue
         match = _searchable_match(text, query)
         if match is None:
@@ -597,6 +725,7 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
             "id": source_id,
             "kind": manifest.get("kind"),
             "authorship": source_authorship(manifest),
+            "project": source_scope,
             "path": local_path,
             "revision": current_revision,
             "locator": locator,
@@ -604,12 +733,91 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
             "score": score,
         })
 
+    def scope_rank(item: dict[str, Any]) -> int:
+        candidate = item.get("project")
+        if requested_project is None:
+            return 0 if candidate is None else 1
+        return 0 if candidate == requested_project else 1
+
     results.sort(
         key=lambda item: (
+            scope_rank(item),
             -item["score"],
-            0 if item["type"] == "source" and item["authorship"] == "human-written" else 1,
+            0 if item["type"] == "source" and item.get("authorship") == "human-written" else 1,
             item["path"],
             item["id"],
         )
     )
     return results
+
+
+def project_inventory(root: Path, project: str | None) -> dict[str, Any]:
+    """Build a verified inventory, optionally prioritizing one project and shared material."""
+    base = _root(root)
+    requested_project = validate_project(project)
+
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for record in _source_records(base):
+        source_id, revision = record.get("source_id"), record.get("revision")
+        if isinstance(source_id, str) and isinstance(revision, str):
+            by_source.setdefault(source_id, []).append(record)
+
+    sources: list[dict[str, Any]] = []
+    for source_id, records in by_source.items():
+        try:
+            current_revision = source_tip(records)
+        except WikiError:
+            continue
+        for record in records:
+            revision = record.get("revision")
+            if not isinstance(revision, str):
+                continue
+            record_scope = source_project(record)
+            if not project_matches(record_scope, requested_project):
+                continue
+            manifest = get_manifest(base, source_id, revision)
+            source_scope = source_project(manifest)
+            manifest_file = manifest_path(base, source_id, revision)
+            sources.append(
+                {
+                    "source_id": source_id,
+                    "revision": revision,
+                    "path": manifest["local_path"],
+                    "manifest_path": _relative(base, manifest_file),
+                    "project": source_scope,
+                    "authorship": source_authorship(manifest),
+                    "current": revision == current_revision,
+                }
+            )
+
+    wiki_pages: list[dict[str, Any]] = []
+    for path in _walk_files(base, "wiki", {".md"}):
+        relative = _relative(base, path)
+        if requested_project is not None and relative in {"wiki/index.md", "wiki/log.md"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        metadata, _, parse_error = _parse_frontmatter(text)
+        if parse_error and parse_error != "missing frontmatter delimiter":
+            continue
+        page_scope = page_project(metadata) if metadata is not None else None
+        if not project_matches(page_scope, requested_project):
+            continue
+        if metadata is not None and not _page_source_refs_match_project(base, metadata, page_scope):
+            continue
+        wiki_pages.append(
+            {
+                "path": relative,
+                "id": _frontmatter_id(text, path.stem),
+                "project": page_scope,
+            }
+        )
+
+    def scope_rank(candidate: str | None) -> int:
+        return 0 if candidate == requested_project else 1
+
+    sources.sort(key=lambda item: (scope_rank(item["project"]), 0 if item["current"] else 1, item["path"], item["source_id"], item["revision"]))
+    wiki_pages.sort(key=lambda item: (scope_rank(item["project"]), item["path"], item["id"]))
+    return {"project": requested_project, "sources": sources, "wiki_pages": wiki_pages}

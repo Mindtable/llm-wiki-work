@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from wiki_tools.errors import WikiError
 from wiki_tools.feedback import feedback_status, submit_feedback
-from wiki_tools.maintenance import complete_job, retry_job, run_maintenance
+from wiki_tools.maintenance import _job_project, _validate_proposal, complete_job, retry_job, run_maintenance
 from wiki_tools.sources import add_source
 
 
@@ -32,6 +32,56 @@ class MaintenanceTests(unittest.TestCase):
         else:
             manifest["authorship"] = authorship
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def set_source_project(self, root, source_id, revision, project):
+        manifest_path = root / "sources" / "manifests" / f"{source_id}--{revision}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        scope = manifest.setdefault("scope", {})
+        if project is None:
+            scope.pop("project", None)
+        else:
+            scope["project"] = project
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def project_page(self, page_id, project=None, source_refs=None):
+        metadata = {
+            "id": page_id,
+            "title": page_id.replace("-", " ").title(),
+            "kind": "process",
+            "domain": "operations",
+            "review_status": "draft",
+            "source_refs": source_refs or [],
+            "depends_on": [],
+            "reviewed_at": None,
+        }
+        if project is not None:
+            metadata["scope"] = {"project": project}
+        return "---\n" + json.dumps(metadata) + "\n---\nProject-scoped page.\n"
+
+    def set_source_project(self, root, source_id, revision, project):
+        manifest_path = root / "sources" / "manifests" / f"{source_id}--{revision}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        scope = manifest.setdefault("scope", {})
+        if project is None:
+            scope.pop("project", None)
+        else:
+            scope["project"] = project
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def project_page(self, page_id, project=None, source_refs=None):
+        metadata = {
+            "id": page_id,
+            "title": page_id.replace("-", " ").title(),
+            "kind": "process",
+            "domain": "operations",
+            "review_status": "draft",
+            "source_refs": source_refs or [],
+            "depends_on": [],
+            "reviewed_at": None,
+        }
+        if project is not None:
+            metadata["scope"] = {"project": project}
+        return "---\n" + json.dumps(metadata) + "\n---\nProject-scoped page.\n"
 
     def payload(self):
         return {
@@ -74,7 +124,6 @@ class MaintenanceTests(unittest.TestCase):
                 "source_id": "refund-procedure",
                 "revision": source["revision"],
                 "locator": "line:1",
-                "authorship": source["authorship"],
             }
         ]
 
@@ -91,7 +140,12 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["status"], "ready_for_review")
         self.assertEqual(page.read_text(encoding="utf-8"), original)
         proposal_path = root / ".state" / "proposals" / f"{submitted['job_id']}.json"
-        self.assertEqual(json.loads(proposal_path.read_text(encoding="utf-8")), self.proposal())
+        expected_proposal = self.proposal()
+        self.assertNotIn("authorship", expected_proposal["evidence"][0])
+        self.assertNotIn("project", expected_proposal["evidence"][0])
+        expected_proposal["evidence"][0]["authorship"] = "unknown"
+        expected_proposal["evidence"][0]["project"] = None
+        self.assertEqual(json.loads(proposal_path.read_text(encoding="utf-8")), expected_proposal)
         self.assertEqual(feedback_status(root, submitted["feedback_id"])["status"], "ready_for_review")
 
     def test_maintenance_discovers_raw_drop_and_queues_ingest_under_writer_lock(self):
@@ -162,7 +216,8 @@ class MaintenanceTests(unittest.TestCase):
         source_id = self.evidence[0]["source_id"]
         revision = self.evidence[0]["revision"]
         self.set_source_authorship(root, source_id, revision, "ai-generated")
-        forged = dict(self.evidence[0], authorship="human-written")
+        self.set_source_project(root, source_id, revision, "alpha")
+        forged = dict(self.evidence[0], authorship="human-written", project="beta")
         proposal = {
             "outcome": "rejected",
             "summary": "The request is not supported by the cited source.",
@@ -177,10 +232,232 @@ class MaintenanceTests(unittest.TestCase):
         proposal_path = root / ".state" / "proposals" / f"{submitted['job_id']}.json"
         saved = json.loads(proposal_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["evidence"][0]["authorship"], "ai-generated")
+        self.assertEqual(saved["evidence"][0]["project"], "alpha")
 
         completed = complete_job(root, submitted["job_id"])
         self.assertEqual(completed["status"], "resolved")
         self.assertEqual(feedback_status(root, submitted["feedback_id"])["status"], "rejected")
+
+    def test_scoped_maintenance_requires_project_page_and_matching_evidence(self):
+        root = self.make_root()
+        self.register_evidence(root)
+        alpha_id = self.evidence[0]["source_id"]
+        alpha_revision = self.evidence[0]["revision"]
+        self.set_source_project(root, alpha_id, alpha_revision, "alpha")
+        beta_path = root / "beta-evidence.md"
+        beta_path.write_text("A beta-specific observation.\n", encoding="utf-8")
+        beta_source = add_source(root, beta_path, source_id="beta-evidence", kind="procedure", project="beta")
+
+        valid = {
+            "outcome": "proposed",
+            "summary": "Record the alpha-specific process.",
+            "changes": [
+                {
+                    "path": "wiki/processes/alpha-process.md",
+                    "content": self.project_page(
+                        "alpha-process",
+                        "alpha",
+                        [{"source_id": alpha_id, "revision": alpha_revision}],
+                    ),
+                }
+            ],
+            "evidence": [{"source_id": alpha_id, "revision": alpha_revision, "locator": "line:1"}],
+        }
+        normalized = _validate_proposal(root, valid, expected_project="alpha")
+        self.assertEqual(normalized["evidence"][0]["source_id"], alpha_id)
+        self.assertEqual(normalized["evidence"][0]["project"], "alpha")
+
+        shared_path = root / "shared-evidence.md"
+        shared_path.write_text("A generally applicable rule.\n", encoding="utf-8")
+        shared_source = add_source(root, shared_path, source_id="shared-evidence", kind="procedure")
+        general_job = {
+            "outcome": "proposed",
+            "summary": "Record a generally applicable process.",
+            "changes": [
+                {
+                    "path": "wiki/processes/shared-process.md",
+                    "content": self.project_page(
+                        "shared-process",
+                        None,
+                        [{"source_id": "shared-evidence", "revision": shared_source["revision"]}],
+                    ),
+                }
+            ],
+            "evidence": [{"source_id": "shared-evidence", "revision": shared_source["revision"], "locator": "line:1"}],
+        }
+        _validate_proposal(root, general_job, expected_project=None, project_bound=True)
+
+        (root / "wiki" / "index.md").write_text("# Shared index\n", encoding="utf-8")
+        (root / "wiki" / "log.md").write_text("# Publication history\n", encoding="utf-8")
+        for navigation_page in ("wiki/index.md", "wiki/log.md"):
+            with self.subTest(navigation_page=navigation_page):
+                navigation_evidence = json.loads(json.dumps(general_job))
+                navigation_evidence["evidence"][0]["wiki_page"] = navigation_page
+                with self.assertRaises(WikiError) as rejected_navigation:
+                    _validate_proposal(root, navigation_evidence, expected_project=None, project_bound=True)
+                self.assertEqual(rejected_navigation.exception.code, "invalid_proposal")
+
+        general_with_project_evidence = json.loads(json.dumps(general_job))
+        general_with_project_evidence["evidence"] = [
+            {"source_id": "beta-evidence", "revision": beta_source["revision"], "locator": "line:1"}
+        ]
+        with self.assertRaises(WikiError) as project_evidence:
+            _validate_proposal(root, general_with_project_evidence, expected_project=None, project_bound=True)
+        self.assertEqual(project_evidence.exception.code, "invalid_proposal")
+
+        global_page = json.loads(json.dumps(valid))
+        global_page["changes"][0]["content"] = self.project_page("alpha-process")
+        with self.assertRaises(WikiError) as missing_scope:
+            _validate_proposal(root, global_page, expected_project="alpha")
+        self.assertEqual(missing_scope.exception.code, "invalid_proposal")
+
+        wrong_evidence = json.loads(json.dumps(valid))
+        wrong_evidence["evidence"] = [
+            {"source_id": "beta-evidence", "revision": beta_source["revision"], "locator": "line:1"}
+        ]
+        with self.assertRaises(WikiError) as foreign_evidence:
+            _validate_proposal(root, wrong_evidence, expected_project="alpha")
+        self.assertEqual(foreign_evidence.exception.code, "invalid_proposal")
+
+        beta_page = root / "wiki" / "processes" / "beta-evidence-page.md"
+        beta_page.write_text(self.project_page("beta-evidence-page", "beta"), encoding="utf-8")
+        foreign_page_evidence = json.loads(json.dumps(valid))
+        foreign_page_evidence["evidence"][0]["wiki_page"] = "wiki/processes/beta-evidence-page.md"
+        with self.assertRaises(WikiError) as foreign_page:
+            _validate_proposal(root, foreign_page_evidence, expected_project="alpha")
+        self.assertEqual(foreign_page.exception.code, "invalid_proposal")
+
+    def test_scoped_maintenance_cannot_relabel_an_existing_general_or_foreign_page(self):
+        for existing_project in (None, "beta"):
+            with self.subTest(existing_project=existing_project):
+                root = self.make_root()
+                self.register_evidence(root)
+                alpha_id = self.evidence[0]["source_id"]
+                alpha_revision = self.evidence[0]["revision"]
+                self.set_source_project(root, alpha_id, alpha_revision, "alpha")
+                existing_refs = []
+                if existing_project == "beta":
+                    beta_path = root / "beta-existing.md"
+                    beta_path.write_text("Existing beta page evidence.\n", encoding="utf-8")
+                    beta_source = add_source(root, beta_path, source_id="beta-existing", kind="procedure", project="beta")
+                    existing_refs = [{"source_id": "beta-existing", "revision": beta_source["revision"]}]
+                existing_page = root / "wiki" / "processes" / "existing.md"
+                existing_page.write_text(self.project_page("existing", existing_project, existing_refs), encoding="utf-8")
+                proposal = {
+                    "outcome": "proposed",
+                    "summary": "Relabel the existing page.",
+                    "changes": [
+                        {
+                            "path": "wiki/processes/existing.md",
+                            "content": self.project_page(
+                                "existing",
+                                "alpha",
+                                [{"source_id": alpha_id, "revision": alpha_revision}],
+                            ),
+                        }
+                    ],
+                    "evidence": [{"source_id": alpha_id, "revision": alpha_revision, "locator": "line:1"}],
+                }
+
+                with self.assertRaises(WikiError) as rejected:
+                    _validate_proposal(root, proposal, expected_project="alpha")
+                self.assertEqual(rejected.exception.code, "invalid_proposal")
+                with self.assertRaises(WikiError) as unbound_rejected:
+                    _validate_proposal(root, proposal, expected_project=None, project_bound=False)
+                self.assertEqual(unbound_rejected.exception.code, "invalid_proposal")
+
+    def test_scoped_ingest_completion_rechecks_edited_saved_page_scope(self):
+        from wiki_tools.feedback import enqueue_ingest
+
+        root = self.make_root()
+        self.register_evidence(root)
+        source_id = self.evidence[0]["source_id"]
+        revision = self.evidence[0]["revision"]
+        self.set_source_project(root, source_id, revision, "alpha")
+        queued = enqueue_ingest(root, source_id, revision)
+        proposal = {
+            "outcome": "proposed",
+            "summary": "Add an alpha-only process page.",
+            "changes": [
+                {
+                    "path": "wiki/processes/alpha-process.md",
+                    "content": self.project_page(
+                        "alpha-process",
+                        "alpha",
+                        [{"source_id": source_id, "revision": revision}],
+                    ),
+                }
+            ],
+            "evidence": [{"source_id": source_id, "revision": revision, "locator": "line:1"}],
+        }
+        result = run_maintenance(root, lambda prompt: proposal)
+        self.assertEqual(result["items"][0]["status"], "ready_for_review")
+
+        proposal_path = root / ".state" / "proposals" / f"{queued['job_id']}.json"
+        saved = json.loads(proposal_path.read_text(encoding="utf-8"))
+        saved["changes"][0]["content"] = self.project_page("alpha-process")
+        proposal_path.write_text(json.dumps(saved), encoding="utf-8")
+        with self.assertRaises(WikiError) as rejected:
+            complete_job(root, queued["job_id"])
+        self.assertEqual(rejected.exception.code, "invalid_proposal")
+
+    def test_feedback_project_is_read_from_safe_local_answer_not_feedback_payload(self):
+        root = self.make_root()
+        answer_id = "a" * 32
+        answer_dir = root / ".state" / "answers"
+        answer_dir.mkdir(parents=True)
+        (answer_dir / f"{answer_id}.json").write_text(
+            json.dumps({"answer_id": answer_id, "scope": {"project": "alpha"}}),
+            encoding="utf-8",
+        )
+        feedback_job = {
+            "job_type": "feedback",
+            "payload": json.dumps({"answer_id": answer_id, "project": "beta"}),
+        }
+        scoped = _job_project(root, feedback_job)
+        self.assertEqual(scoped.project, "alpha")
+        self.assertTrue(scoped.bound)
+
+        absent_answer = {
+            "job_type": "feedback",
+            "payload": json.dumps({"answer_id": "b" * 32, "project": "beta"}),
+        }
+        unbound = _job_project(root, absent_answer)
+        self.assertIsNone(unbound.project)
+        self.assertFalse(unbound.bound)
+
+        unscoped_answer_id = "d" * 32
+        (answer_dir / f"{unscoped_answer_id}.json").write_text(
+            json.dumps({"answer_id": unscoped_answer_id, "scope": {"project": None}}),
+            encoding="utf-8",
+        )
+        unscoped_answer = {
+            "job_type": "feedback",
+            "payload": json.dumps({"answer_id": unscoped_answer_id}),
+        }
+        unscoped_binding = _job_project(root, unscoped_answer)
+        self.assertIsNone(unscoped_binding.project)
+        self.assertFalse(unscoped_binding.bound)
+
+        unsafe_answer = {
+            "job_type": "feedback",
+            "payload": json.dumps({"answer_id": "../../outside", "project": "beta"}),
+        }
+        unsafe = _job_project(root, unsafe_answer)
+        self.assertIsNone(unsafe.project)
+        self.assertFalse(unsafe.bound)
+
+        (answer_dir / f"{'c' * 32}.json").write_text(
+            json.dumps({"answer_id": "c" * 32, "scope": "malformed"}),
+            encoding="utf-8",
+        )
+        malformed_answer = {
+            "job_type": "feedback",
+            "payload": json.dumps({"answer_id": "c" * 32}),
+        }
+        with self.assertRaises(WikiError) as malformed_scope:
+            _job_project(root, malformed_answer)
+        self.assertEqual(malformed_scope.exception.code, "invalid_state")
 
     def test_executor_failure_and_invalid_proposal_fail_durably_and_retry_is_explicit(self):
         for executor in (lambda prompt: (_ for _ in ()).throw(RuntimeError("temporary outage")), lambda prompt: {"outcome": "proposed"}):

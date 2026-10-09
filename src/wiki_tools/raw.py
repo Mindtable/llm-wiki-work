@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import WikiError
 from .feedback import enqueue_ingest
-from .sources import SOURCE_AUTHORSHIPS, SOURCE_ID_RE, add_source, safe_managed_path
+from .sources import SOURCE_AUTHORSHIPS, SOURCE_ID_RE, add_source, safe_managed_path, validate_project
 
 
 _TEMP_SUFFIXES = {".tmp", ".part", ".partial", ".download", ".crdownload", ".swp", ".swo"}
@@ -119,6 +119,24 @@ def raw_drop_authorship(relative_path: str) -> str:
     return "unknown"
 
 
+def raw_drop_project(relative_path: str) -> str | None:
+    """Read a project slug only from the reserved raw/projects/<slug>/ layout."""
+    parts = PurePosixPath(relative_path).parts
+    if len(parts) < 3 or parts[:2] != ("sources", "raw"):
+        return None
+    projects_index = 2
+    if len(parts) > 2 and parts[2] in {"ai-generated", "human-written"}:
+        projects_index = 3
+    if projects_index >= len(parts) or parts[projects_index] != "projects":
+        return None
+    if len(parts) <= projects_index + 1:
+        raise WikiError("invalid_project", f"Project folder is missing a slug: {relative_path}.")
+    project = validate_project(parts[projects_index + 1])
+    if len(parts) <= projects_index + 2:
+        raise WikiError("invalid_project", f"Project folder must contain a file: {relative_path}.")
+    return project
+
+
 def raw_drop_files(root: Path) -> list[tuple[str, Path, str, str]]:
     """Return eligible drop paths with stable IDs and current content hashes."""
     base = _root(root)
@@ -162,6 +180,7 @@ def discover_raw_sources(root: Path) -> list[dict]:
                 kind="unclassified",
                 origin=relative,
                 default_authorship=raw_drop_authorship(relative),
+                default_project=raw_drop_project(relative),
             )
             if manifest["revision"] != scanned_revision:
                 raise WikiError(

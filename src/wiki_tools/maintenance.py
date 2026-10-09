@@ -10,17 +10,33 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from .errors import WikiError
 from .feedback import _connect, _now
-from .knowledge import validate_page_document, validate_source_reference
-from .sources import ensure_managed_dir, get_manifest, safe_managed_path, source_authorship
+from .knowledge import _parse_frontmatter, _wiki_page_in_scope, page_project, validate_page_document, validate_source_reference, wiki_page_in_project
+from .sources import (
+    ensure_managed_dir,
+    get_manifest,
+    project_matches,
+    safe_managed_path,
+    source_authorship,
+    source_project,
+    validate_project,
+)
 
 
 COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+ANSWER_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+
+
+@dataclass(frozen=True)
+class _ProjectBinding:
+    project: str | None
+    bound: bool
 
 
 @contextmanager
@@ -94,20 +110,60 @@ def _claim_next(root: Path) -> dict[str, Any] | None:
         connection.close()
 
 
-def _make_prompt(job: dict[str, Any], root: Path) -> str:
+def _job_project(root: Path, job: dict[str, Any]) -> _ProjectBinding:
+    """Resolve a job's project from its registered source or saved answer record."""
+    payload = json.loads(job["payload"])
+    if job["job_type"] == "ingest":
+        manifest = get_manifest(root, payload["source_id"], payload["revision"])
+        return _ProjectBinding(source_project(manifest), True)
+    if job["job_type"] != "feedback":
+        return _ProjectBinding(None, False)
+
+    answer_id = payload.get("answer_id")
+    if not isinstance(answer_id, str) or not ANSWER_ID_RE.fullmatch(answer_id):
+        return _ProjectBinding(None, False)
+    answer_path = safe_managed_path(root, f".state/answers/{answer_id}.json")
+    if not answer_path.exists():
+        return _ProjectBinding(None, False)
+    if answer_path.is_symlink() or not answer_path.is_file():
+        raise WikiError("invalid_state", "The saved answer record must be a regular file.")
+    try:
+        answer = json.loads(answer_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WikiError("invalid_state", f"Failed to read saved answer record: {exc}.") from exc
+    if not isinstance(answer, dict) or answer.get("answer_id") != answer_id:
+        raise WikiError("invalid_state", "Saved answer record does not match its answer_id.")
+    scope = answer.get("scope")
+    if not isinstance(scope, dict):
+        raise WikiError("invalid_state", "Saved answer record has invalid scope metadata.")
+    project = validate_project(scope.get("project"), error_code="invalid_project")
+    return _ProjectBinding(project, project is not None)
+
+
+def _make_prompt(job: dict[str, Any], root: Path, binding: _ProjectBinding) -> str:
     if job["job_type"] == "ingest":
         operation = "ingest_source"
         directions = "Read the registered source revision and prepare an evidence-backed proposal for the wiki."
         payload = json.loads(job["payload"])
         manifest = get_manifest(root, payload["source_id"], payload["revision"])
         payload["authorship"] = source_authorship(manifest)
+        payload["scope"] = {"project": source_project(manifest)}
     else:
         operation = "review_feedback"
         directions = "Review the feedback against registered sources and prepare a proposal for manual review."
         payload = json.loads(job["payload"])
+    if binding.bound and binding.project is not None:
+        directions += f" Keep every normal page in project {binding.project}; use evidence from that project or general scope."
+        directions += " Do not relabel an existing page from another project or from the general scope."
+    elif binding.bound:
+        directions += " This is a general source; keep normal pages and evidence in the general, unassigned scope."
+    else:
+        directions += " No project binding is available; do not infer one from feedback text and preserve existing page assignments and reference consistency."
     envelope = {
         "operation": operation,
         "job_id": job["job_id"],
+        "expected_project": binding.project,
+        "project_bound": binding.bound,
         "payload": payload,
         "contract": {
             "outcome": "proposed | rejected | needs_evidence",
@@ -120,7 +176,17 @@ def _make_prompt(job: dict[str, Any], root: Path) -> str:
     return directions + "\n" + trust_note + "\nReturn a single JSON object that follows the contract. Do not write files or publish changes.\n" + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
 
 
-def _validate_evidence(root: Path, evidence: Any, outcome: str) -> list[dict[str, Any]]:
+def _validate_evidence(
+    root: Path,
+    evidence: Any,
+    outcome: str,
+    *,
+    expected_project: str | None = None,
+    project_bound: bool | None = None,
+) -> list[dict[str, Any]]:
+    expected_project = validate_project(expected_project)
+    if project_bound is None:
+        project_bound = expected_project is not None
     if not isinstance(evidence, list):
         raise WikiError("invalid_proposal", "evidence must be a list of citations.")
     if outcome in {"proposed", "rejected"} and not evidence:
@@ -136,11 +202,27 @@ def _validate_evidence(root: Path, evidence: Any, outcome: str) -> list[dict[str
             manifest, _ = validate_source_reference(root, source_id, revision, locator, item.get("wiki_page"))
         except WikiError as exc:
             raise WikiError("invalid_proposal", f"Evidence {source_id}@{revision} failed validation: {exc.message}") from exc
+        evidence_project = source_project(manifest)
+        if project_bound:
+            evidence_matches = evidence_project is None if expected_project is None else project_matches(evidence_project, expected_project)
+            if not evidence_matches:
+                raise WikiError("invalid_proposal", f"Evidence {source_id}@{revision} is outside the expected project scope.")
+        wiki_page = item.get("wiki_page")
+        if wiki_page is not None:
+            if project_bound and expected_project is None:
+                page_matches = _wiki_page_in_scope(root, wiki_page, None, bound=True)
+            elif project_bound:
+                page_matches = wiki_page_in_project(root, wiki_page, expected_project)
+            else:
+                page_matches = wiki_page_in_project(root, wiki_page, None)
+            if not page_matches:
+                raise WikiError("invalid_proposal", f"Evidence wiki_page {wiki_page} is outside the expected project scope.")
         citation: dict[str, Any] = {
             "source_id": source_id,
             "revision": revision,
             "locator": locator,
             "authorship": source_authorship(manifest),
+            "project": evidence_project,
         }
         for optional in ("supports", "note"):
             if optional in item:
@@ -156,7 +238,16 @@ def _validate_evidence(root: Path, evidence: Any, outcome: str) -> list[dict[str
     return validated
 
 
-def _validate_proposal(root: Path, value: Any) -> dict[str, Any]:
+def _validate_proposal(
+    root: Path,
+    value: Any,
+    *,
+    expected_project: str | None = None,
+    project_bound: bool | None = None,
+) -> dict[str, Any]:
+    expected_project = validate_project(expected_project)
+    if project_bound is None:
+        project_bound = expected_project is not None
     if not isinstance(value, dict):
         raise WikiError("invalid_proposal", "The maintenance response must be a JSON object.")
     outcome = value.get("outcome")
@@ -192,10 +283,35 @@ def _validate_proposal(root: Path, value: Any) -> dict[str, Any]:
             safe_managed_path(root, relative)
         except WikiError as exc:
             raise WikiError("invalid_proposal", f"Unsafe changed path: {relative}.") from exc
-        validate_page_document(root, relative, content)
+        page_metadata = validate_page_document(root, relative, content)
+        if page_metadata is not None:
+            proposed_project = page_project(page_metadata, error_code="invalid_proposal")
+            if project_bound and proposed_project != expected_project:
+                scope_name = expected_project if expected_project is not None else "the general scope"
+                raise WikiError("invalid_proposal", f"A scoped proposal must keep page {relative} in {scope_name}.")
+            existing_path = safe_managed_path(root, relative)
+            if existing_path.exists():
+                if existing_path.is_symlink() or not existing_path.is_file():
+                    raise WikiError("invalid_proposal", f"Existing page path is not a regular file: {relative}.")
+                try:
+                    existing_text = existing_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise WikiError("invalid_proposal", f"Failed to read existing page {relative}: {exc}.") from exc
+                existing_metadata, _, existing_error = _parse_frontmatter(existing_text)
+                if existing_error and existing_error != "missing frontmatter delimiter":
+                    raise WikiError("invalid_proposal", f"Existing page metadata is invalid: {relative}.")
+                existing_project = page_project(existing_metadata, error_code="invalid_proposal") if existing_metadata is not None else None
+                if existing_project != proposed_project:
+                    raise WikiError("invalid_proposal", f"A proposal cannot change the project assignment of existing page {relative}.")
         normalized_changes.append({"path": relative, "content": content})
 
-    evidence = _validate_evidence(root, value.get("evidence", []), outcome)
+    evidence = _validate_evidence(
+        root,
+        value.get("evidence", []),
+        outcome,
+        expected_project=expected_project,
+        project_bound=project_bound,
+    )
     return {"outcome": outcome, "summary": summary.strip(), "changes": normalized_changes, "evidence": evidence}
 
 
@@ -301,8 +417,14 @@ def run_maintenance(root: Path, execute: Callable[[str], dict], limit: int = 1) 
             if job is None:
                 break
             try:
-                raw_proposal = execute(_make_prompt(job, base))
-                proposal = _validate_proposal(base, raw_proposal)
+                binding = _job_project(base, job)
+                raw_proposal = execute(_make_prompt(job, base, binding))
+                proposal = _validate_proposal(
+                    base,
+                    raw_proposal,
+                    expected_project=binding.project,
+                    project_bound=binding.bound,
+                )
                 proposal_path = _write_proposal(base, job["job_id"], proposal)
                 _mark_ready(base, job, proposal, proposal_path)
                 items.append({"job_id": job["job_id"], "status": "ready_for_review", "outcome": proposal["outcome"], "proposal_path": proposal_path})
@@ -402,7 +524,13 @@ def complete_job(root: Path, job_id: str, revision: str | None = None) -> dict[s
                 raw = json.loads(proposal_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise WikiError("invalid_proposal", f"Failed to read the saved proposal: {exc}.") from exc
-            proposal = _validate_proposal(base, raw)
+            binding = _job_project(base, job)
+            proposal = _validate_proposal(
+                base,
+                raw,
+                expected_project=binding.project,
+                project_bound=binding.bound,
+            )
             commit: str | None = None
             if proposal["outcome"] == "proposed":
                 if revision is None:

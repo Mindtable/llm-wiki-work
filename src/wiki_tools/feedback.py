@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import WikiError
-from .sources import SOURCE_ID_RE, ensure_managed_dir, get_manifest, safe_managed_path, source_authorship
+from .sources import SOURCE_ID_RE, ensure_managed_dir, get_manifest, safe_managed_path, source_authorship, source_project
 
 
 FEEDBACK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -185,6 +185,7 @@ def enqueue_ingest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
         "revision": revision,
         "kind": manifest.get("kind"),
         "authorship": source_authorship(manifest),
+        "scope": {"project": source_project(manifest)},
     }
     encoded = _canonical(payload)
     connection = _connect(root)

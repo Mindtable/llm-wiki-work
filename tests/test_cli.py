@@ -210,5 +210,92 @@ class CliTests(unittest.TestCase):
         self.assertIn("unknown", help_text)
         self.assertIn("Authorship", help_text)
 
+    def test_source_add_project_option_is_validated_and_persisted(self):
+        source_file = self.outside / "project-note.md"
+        source_file.write_text("Idea for Atlas.\n", encoding="utf-8")
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main([
+                "--root", str(self.root), "source", "add", str(source_file),
+                "--id", "atlas-note", "--kind", "unclassified", "--project", "atlas",
+            ])
+        self.assertEqual(exit_code, 0)
+        value = self.assert_one_json_line(stdout.getvalue())
+        self.assertEqual(value["scope"]["project"], "atlas")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            invalid_exit = main([
+                "--root", str(self.root), "source", "add", str(source_file),
+                "--id", "bad-project", "--kind", "unclassified", "--project", "Atlas",
+            ])
+        self.assertNotEqual(invalid_exit, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue())["error"]["code"], "invalid_project")
+
+    def test_search_project_option_is_forwarded_to_knowledge_search(self):
+        with patch("wiki_tools.knowledge.search", return_value=[{"id": "atlas-note"}]) as searcher:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main(["--root", str(self.root), "search", "--project", "atlas", "expense", "approval"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), [{"id": "atlas-note"}])
+        searcher.assert_called_once_with(self.root, "expense approval", project="atlas")
+
+    def test_ask_project_flag_merges_with_request_and_keeps_literal_tail(self):
+        calls = []
+        stdout = io.StringIO()
+        with patch("wiki_tools.cli.ask", side_effect=lambda root, request: calls.append(request) or request):
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "--root", str(self.root), "ask", "--project", "atlas", "--", "--model", "literal question",
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[-1], {"question": "--model literal question", "scope": {"project": "atlas"}})
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), calls[-1])
+
+        request_file = self.outside / "request.json"
+        request_file.write_text(json.dumps({"question": "Where is approval?", "scope": {"process": "refund"}}), encoding="utf-8")
+        stdout = io.StringIO()
+        with patch("wiki_tools.cli.ask", side_effect=lambda root, request: calls.append(request) or request):
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "--root", str(self.root), "ask", "--request", str(request_file), "--project", "atlas",
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[-1], {"question": "Where is approval?", "scope": {"process": "refund", "project": "atlas"}})
+
+    def test_ask_project_accepts_natural_positional_question_without_separator(self):
+        calls = []
+        stdout = io.StringIO()
+        with patch("wiki_tools.cli.ask", side_effect=lambda root, request: calls.append(request) or request):
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "--root", str(self.root), "ask", "--project", "atlas", "What ideas did we record?",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, [{"question": "What ideas did we record?", "scope": {"project": "atlas"}}])
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), calls[0])
+
+    def test_ask_rejects_conflicting_or_malformed_project_scope(self):
+        request_file = self.outside / "request.json"
+        cases = (
+            ({"question": "Where?", "scope": {"project": "borealis"}}, "atlas", "argument_error"),
+            ({"question": "Where?", "scope": "atlas"}, "atlas", "argument_error"),
+            ({"question": "Where?", "scope": {"project": []}}, None, "invalid_project"),
+        )
+        for payload, selected_project, expected_code in cases:
+            with self.subTest(payload=payload, selected_project=selected_project):
+                request_file.write_text(json.dumps(payload), encoding="utf-8")
+                argv = ["--root", str(self.root), "ask", "--request", str(request_file)]
+                if selected_project is not None:
+                    argv.extend(["--project", selected_project])
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    exit_code = main(argv)
+                self.assertNotEqual(exit_code, 0)
+                self.assertEqual(self.assert_one_json_line(stdout.getvalue())["error"]["code"], expected_code)
+
 if __name__ == "__main__":
     unittest.main()

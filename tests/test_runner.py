@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from wiki_tools.config import RunConfig
 from wiki_tools.errors import WikiError
-from wiki_tools.runner import ask, run_opencode
+from wiki_tools.runner import _validate_answer, _validate_request, ask, run_opencode
 from wiki_tools.sources import add_source
 
 
@@ -174,6 +174,16 @@ class RunnerTests(unittest.TestCase):
             manifest.pop("authorship", None)
         else:
             manifest["authorship"] = authorship
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def set_project(self, source_id, revision, project):
+        manifest_path = self.root / "sources" / "manifests" / f"{source_id}--{revision}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        scope = manifest.setdefault("scope", {})
+        if project is None:
+            scope.pop("project", None)
+        else:
+            scope["project"] = project
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def test_prompt_is_one_literal_argument_and_runtime_policy_is_explicit(self):
@@ -400,7 +410,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(record_path.read_text(encoding="utf-8")), answer)
         captured = json.loads(capture_path.read_text(encoding="utf-8"))
         prompt = captured["args"][-1]
-        self.assertIn(json.dumps({"question": question, "scope": {"process": "onboarding", "product": None, "environment": None, "version": None}}, ensure_ascii=False, separators=(",", ":")), prompt)
+        self.assertIn(json.dumps({"question": question, "scope": {"process": "onboarding", "product": None, "environment": None, "version": None, "project": None}}, ensure_ascii=False, separators=(",", ":")), prompt)
         self.assertFalse((self.root / "no-file").exists())
 
     def test_ask_rejects_citation_to_missing_source_locator(self):
@@ -541,6 +551,136 @@ class RunnerTests(unittest.TestCase):
             {citation["citation_id"]: citation["authorship"] for citation in answer["citations"]},
             {"ai1": "ai-generated", "human1": "human-written"},
         )
+
+    def test_project_request_and_answer_scope_are_normalized_and_checked(self):
+        request = _validate_request({"question": "What does alpha require?", "scope": {"project": "alpha"}})
+        self.assertEqual(request["scope"]["project"], "alpha")
+
+        legacy_answer = json.loads(answer_json())
+        scoped = _validate_answer(self.root, legacy_answer, project="alpha")
+        self.assertEqual(scoped["scope"]["project"], "alpha")
+
+        unscoped = _validate_answer(self.root, legacy_answer, project=None)
+        self.assertIsNone(unscoped["scope"]["project"])
+
+        wrong_project = json.loads(answer_json())
+        wrong_project["scope"]["project"] = "beta"
+        with self.assertRaises(WikiError) as wrong_scope:
+            _validate_answer(self.root, wrong_project, project="alpha")
+        self.assertEqual(wrong_scope.exception.code, "answer_validation_error")
+
+        unrequested_project = json.loads(answer_json())
+        unrequested_project["scope"]["project"] = "alpha"
+        with self.assertRaises(WikiError) as unrequested_scope:
+            _validate_answer(self.root, unrequested_project)
+        self.assertEqual(unrequested_scope.exception.code, "answer_validation_error")
+
+        with self.assertRaises(WikiError) as invalid_project:
+            _validate_request({"question": "Question?", "scope": {"project": "../alpha"}})
+        self.assertEqual(invalid_project.exception.code, "invalid_project")
+
+    def test_scoped_ask_embeds_only_project_and_general_inventory(self):
+        alpha_revision = self.register_markdown_source()
+        self.set_project("policy", alpha_revision, "alpha")
+        general_path = self.root / "general.md"
+        general_path.write_text("Shared process note.\n", encoding="utf-8")
+        add_source(self.root, general_path, source_id="general-note", kind="unclassified")
+        beta_path = self.root / "beta.md"
+        beta_path.write_text("Beta process note.\n", encoding="utf-8")
+        beta_source = add_source(self.root, beta_path, source_id="beta-note", kind="unclassified")
+        self.set_project("beta-note", beta_source["revision"], "beta")
+        self.install_answer(json.loads(answer_json()))
+
+        answer = ask(self.root, {"question": "What applies to alpha?", "scope": {"project": "alpha"}})
+
+        self.assertEqual(answer["scope"]["project"], "alpha")
+        capture = json.loads((self.root / "capture.json").read_text(encoding="utf-8"))
+        prompt = capture["args"][-1]
+        inventory_text = prompt.split("Eligible project inventory (JSON):\n", 1)[1].split("\nRequest data (JSON):\n", 1)[0]
+        inventory = json.loads(inventory_text)
+        self.assertEqual({row["source_id"] for row in inventory["sources"]}, {"policy", "general-note"})
+
+    def test_unscoped_ask_embeds_all_inventory_with_general_sources_first(self):
+        self.register_markdown_source()
+        beta_path = self.root / "beta.md"
+        beta_path.write_text("A beta-specific note.\n", encoding="utf-8")
+        beta_source = add_source(self.root, beta_path, source_id="beta-note", kind="unclassified")
+        self.set_project("beta-note", beta_source["revision"], "beta")
+        (self.root / "wiki" / "index.md").write_text("# Wiki index\n", encoding="utf-8")
+        (self.root / "wiki" / "log.md").write_text("# Wiki log\n", encoding="utf-8")
+        self.install_answer(json.loads(answer_json()))
+
+        ask(self.root, {"question": "What does the wiki know?"})
+
+        capture = json.loads((self.root / "capture.json").read_text(encoding="utf-8"))
+        prompt = capture["args"][-1]
+        inventory_text = prompt.split("Eligible project inventory (JSON):\n", 1)[1].split("\nRequest data (JSON):\n", 1)[0]
+        inventory = json.loads(inventory_text)
+        self.assertEqual([row["project"] for row in inventory["sources"]], [None, "beta"])
+        paths = {row["path"] for row in inventory["wiki_pages"]}
+        self.assertIn("wiki/index.md", paths)
+        self.assertIn("wiki/log.md", paths)
+
+    def test_scoped_answer_accepts_project_and_general_citations_but_rejects_foreign_scope(self):
+        alpha_revision = self.register_markdown_source()
+        self.set_project("policy", alpha_revision, "alpha")
+        general_path = self.root / "general.md"
+        general_path.write_text("A shared rule.\n", encoding="utf-8")
+        general_source = add_source(self.root, general_path, source_id="general-policy", kind="procedure")
+        beta_path = self.root / "beta.md"
+        beta_path.write_text("A separate rule.\n", encoding="utf-8")
+        beta_source = add_source(self.root, beta_path, source_id="beta-policy", kind="procedure")
+        self.set_project("beta-policy", beta_source["revision"], "beta")
+
+        beta_page = self.root / "wiki" / "processes" / "beta.md"
+        beta_page.write_text(
+            "---\n" + json.dumps({
+                "id": "beta-page",
+                "title": "Beta",
+                "kind": "process",
+                "domain": "operations",
+                "review_status": "draft",
+                "source_refs": [],
+                "depends_on": [],
+                "reviewed_at": None,
+                "scope": {"project": "beta"},
+            }) + "\n---\n# Beta\n",
+            encoding="utf-8",
+        )
+
+        answer = json.loads(answer_json())
+        answer["citations"] = [
+            {"citation_id": "alpha1", "source_id": "policy", "revision": alpha_revision, "locator": "line:2", "wiki_page": "wiki/processes/policy.md#approval"},
+            {"citation_id": "general1", "source_id": "general-policy", "revision": general_source["revision"], "locator": "line:1"},
+        ]
+        answer["claims"] = [
+            {"claim_id": "alpha-claim", "text": "Alpha note claim.", "status": "supported", "citation_ids": ["alpha1"]},
+            {"claim_id": "general-claim", "text": "Shared note claim.", "status": "supported", "citation_ids": ["general1"]},
+        ]
+        normalized = _validate_answer(self.root, answer, project="alpha")
+        self.assertEqual(normalized["scope"]["project"], "alpha")
+        self.assertEqual(
+            {item["citation_id"]: item["project"] for item in normalized["citations"]},
+            {"alpha1": "alpha", "general1": None},
+        )
+
+        foreign_source = json.loads(json.dumps(answer))
+        foreign_source["citations"][0].update({"source_id": "beta-policy", "revision": beta_source["revision"]})
+        with self.assertRaises(WikiError) as source_error:
+            _validate_answer(self.root, foreign_source, project="alpha")
+        self.assertEqual(source_error.exception.code, "answer_validation_error")
+
+        foreign_page = json.loads(json.dumps(answer))
+        foreign_page["citations"][1]["wiki_page"] = "wiki/processes/beta.md#beta"
+        with self.assertRaises(WikiError) as page_error:
+            _validate_answer(self.root, foreign_page, project="alpha")
+        self.assertEqual(page_error.exception.code, "answer_validation_error")
+
+        forged_project = json.loads(json.dumps(answer))
+        forged_project["citations"][0]["project"] = "beta"
+        with self.assertRaises(WikiError) as forged_error:
+            _validate_answer(self.root, forged_project, project="alpha")
+        self.assertEqual(forged_error.exception.code, "answer_validation_error")
 
     def test_ask_rejects_non_string_claim_status(self):
         model_answer = json.loads(answer_json())
