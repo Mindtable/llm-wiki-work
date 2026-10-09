@@ -1,15 +1,19 @@
 import json
 import io
 import os
+import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from wiki_tools.cli import main
+from wiki_tools.feedback import _connect
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -21,11 +25,50 @@ def make_root():
     return root
 
 
+def create_ready_review_job(root):
+    job_id = uuid.uuid4().hex
+    proposal_path = root / ".state" / "proposals" / f"{job_id}.json"
+    proposal_path.parent.mkdir(parents=True)
+    proposal_path.write_text(
+        json.dumps(
+            {
+                "outcome": "needs_evidence",
+                "summary": "The available material does not yet support a change.",
+                "changes": [],
+                "evidence": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    connection = _connect(root)
+    try:
+        created_at = "2026-10-09T10:00:00Z"
+        connection.execute(
+            "INSERT INTO jobs (job_id, job_type, status, payload, proposal_path, created_at, updated_at) "
+            "VALUES (?, 'feedback', 'ready_for_review', ?, ?, ?, ?)",
+            (job_id, "{}", f".state/proposals/{job_id}.json", created_at, created_at),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return job_id, proposal_path
+
+
+def read_job_status(root, job_id):
+    database_uri = f"{(root / '.state' / 'queue.sqlite3').as_uri()}?mode=ro"
+    with sqlite3.connect(database_uri, uri=True) as connection:
+        row = connection.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    return row[0]
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="wiki-caller-")
         self.outside = Path(self.temp.name).resolve()
         self.root = make_root()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         env = os.environ.copy()
         env["PYTHONPATH"] = str(PROJECT / "src")
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -164,6 +207,91 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertEqual(value, result)
+
+    def test_maintenance_run_forwards_target_id_and_limit(self):
+        result = {"processed": 1, "items": [{"job_id": "a" * 32, "status": "ready_for_review"}]}
+        with patch("wiki_tools.cli.load_config", return_value=object()), patch(
+            "wiki_tools.maintenance.run_maintenance", return_value=result
+        ) as runner:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main([
+                    "--root", str(self.root), "maintenance", "run", "--limit", "5", "--id", "a" * 32,
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), result)
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0], self.root)
+        self.assertEqual(runner.call_args.kwargs["limit"], 5)
+        self.assertEqual(runner.call_args.kwargs["job_id"], "a" * 32)
+
+    def test_maintenance_review_without_queue_returns_json_without_creating_database(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "maintenance", "review"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            self.assert_one_json_line(stdout.getvalue()),
+            {"status": "no_ready_proposals", "job_id": None, "ready_job_ids": []},
+        )
+        self.assertFalse((self.root / ".state").exists())
+
+    def test_maintenance_review_json_uses_real_backend_and_leaves_target_ready(self):
+        job_id, proposal_path = create_ready_review_job(self.root)
+        proposal_before = proposal_path.read_bytes()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "maintenance", "review", "--id", job_id])
+
+        self.assertEqual(exit_code, 0)
+        report = self.assert_one_json_line(stdout.getvalue())
+        self.assertEqual(report["status"], "ready_for_review")
+        self.assertEqual(report["job_id"], job_id)
+        self.assertEqual(report["ready_job_ids"], [job_id])
+        self.assertEqual(report["outcome"], "needs_evidence")
+        self.assertEqual(report["summary"], "The available material does not yet support a change.")
+        self.assertEqual(report["changes"], [])
+        self.assertEqual(report["evidence"], [])
+        self.assertEqual(read_job_status(self.root, job_id), "ready_for_review")
+        self.assertEqual(proposal_path.read_bytes(), proposal_before)
+
+    def test_maintenance_review_markdown_is_readable_and_leaves_target_ready(self):
+        job_id, proposal_path = create_ready_review_job(self.root)
+        proposal_before = proposal_path.read_bytes()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main([
+                "--root", str(self.root), "maintenance", "review", "--id", job_id, "--format", "markdown",
+            ])
+
+        markdown = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn(f"# Proposal {job_id}", markdown)
+        self.assertIn("**needs_evidence**", markdown)
+        self.assertIn("## Rationale", markdown)
+        self.assertIn("The available material does not yet support a change.", markdown)
+        self.assertIn("No wiki changes are proposed for this outcome.", markdown)
+        self.assertIn("No verified evidence citations are included.", markdown)
+        self.assertIn("Accept, Revise, or Defer.", markdown)
+        self.assertNotIn('"status":"ready_for_review"', markdown)
+        self.assertEqual(read_job_status(self.root, job_id), "ready_for_review")
+        self.assertEqual(proposal_path.read_bytes(), proposal_before)
+
+    def test_maintenance_review_missing_target_returns_structured_error_without_creating_database(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main([
+                "--root", str(self.root), "maintenance", "review", "--id", "a" * 32,
+            ])
+
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(
+            self.assert_one_json_line(stdout.getvalue())["error"]["code"],
+            "job_not_found",
+        )
+        self.assertFalse((self.root / ".state").exists())
 
     def test_source_add_authorship_flag_is_validated_and_propagated(self):
         source_file = self.outside / "draft.md"

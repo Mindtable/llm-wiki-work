@@ -1,4 +1,4 @@
-"""JSON-producing command line interface for the local wiki."""
+"""Local wiki CLI with JSON output by default and Markdown proposal reviews."""
 
 from __future__ import annotations
 
@@ -85,6 +85,10 @@ def _build_parser() -> _JsonArgumentParser:
     maintenance_commands = maintenance.add_subparsers(dest="maintenance_command", required=True)
     run = maintenance_commands.add_parser("run", help="Prepare a bounded number of proposals.")
     run.add_argument("--limit", type=int, default=1)
+    run.add_argument("--id", dest="job_id", help="Run only this pending job.")
+    review = maintenance_commands.add_parser("review", help="Review a saved proposal.")
+    review.add_argument("--id", dest="job_id", help="Review this ready proposal; otherwise choose the next ready proposal.")
+    review.add_argument("--format", choices=("json", "markdown"), default="json")
     complete = maintenance_commands.add_parser("complete", help="Record the manual review result.")
     complete.add_argument("--id", required=True, dest="job_id")
     complete.add_argument("--revision", help="Full Git commit verified for a proposed change.")
@@ -243,7 +247,14 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
 
         config = load_config(root, purpose="maintenance")
         execute = lambda prompt: run_opencode(root, config, prompt)
-        return run_maintenance(root, execute, limit=args.limit)
+        return run_maintenance(root, execute, limit=args.limit, job_id=args.job_id)
+    if args.command == "maintenance" and args.maintenance_command == "review":
+        from .review import render_review, review_proposal
+
+        report = review_proposal(root, args.job_id)
+        if args.format == "markdown":
+            return render_review(report)
+        return report
     if args.command == "maintenance" and args.maintenance_command == "complete":
         from .maintenance import complete_job
 
@@ -288,7 +299,15 @@ def main(argv: list[str] | None = None) -> int:
         args = _parse_args(parser, arguments)
         root = _select_root(args.root)
         result = _dispatch(args, root)
-        _emit(result)
+        if args.command == "maintenance" and args.maintenance_command == "review" and args.format == "markdown":
+            if not isinstance(result, str):
+                raise WikiError("review_error", "Markdown review renderer must return text.")
+            sys.stdout.write(result)
+            if not result.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            _emit(result)
         if _operation_failed(args, result):
             print("Command failed; details are in the JSON result.", file=sys.stderr)
             return 1

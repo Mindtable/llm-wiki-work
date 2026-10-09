@@ -74,13 +74,22 @@ def _job_row(connection, job_id: str):
     return dict(row)
 
 
-def _claim_next(root: Path) -> dict[str, Any] | None:
+def _claim_next(root: Path, job_id: str | None = None) -> dict[str, Any] | None:
     connection = _connect(root)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute(
-            "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at, job_id LIMIT 1"
-        ).fetchone()
+        if job_id is not None:
+            if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
+                raise WikiError("invalid_state", "The target job ID must be a 32-character lowercase hexadecimal value.")
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise WikiError("job_not_found", f"Job {job_id} was not found.")
+            if row["status"] != "pending":
+                raise WikiError("invalid_state", f"Target job {job_id} must be pending; its status is {row['status']}.")
+        else:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at, job_id LIMIT 1"
+            ).fetchone()
         if row is None:
             connection.commit()
             return None
@@ -397,7 +406,13 @@ def _mark_ready(root: Path, job: dict[str, Any], proposal: dict[str, Any], propo
         connection.close()
 
 
-def run_maintenance(root: Path, execute: Callable[[str], dict], limit: int = 1) -> dict[str, Any]:
+def run_maintenance(
+    root: Path,
+    execute: Callable[[str], dict],
+    limit: int = 1,
+    *,
+    job_id: str | None = None,
+) -> dict[str, Any]:
     """Prepare at most limit proposals; never write their content into wiki/."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise WikiError("invalid_limit", "limit must be a positive integer.")
@@ -409,11 +424,12 @@ def run_maintenance(root: Path, execute: Callable[[str], dict], limit: int = 1) 
 
     items: list[dict[str, Any]] = []
     with _writer_lock(base):
-        from .raw import discover_raw_sources
+        if job_id is None:
+            from .raw import discover_raw_sources
 
-        discover_raw_sources(base)
+            discover_raw_sources(base)
         while len(items) < limit:
-            job = _claim_next(base)
+            job = _claim_next(base, job_id=job_id)
             if job is None:
                 break
             try:
@@ -436,6 +452,8 @@ def run_maintenance(root: Path, execute: Callable[[str], dict], limit: int = 1) 
                 error = f"{type(exc).__name__}: {exc}"
                 _mark_failed(base, job["job_id"], error)
                 items.append({"job_id": job["job_id"], "status": "failed", "error": error})
+            if job_id is not None:
+                break
     return {"processed": len(items), "items": items}
 
 
@@ -545,8 +563,8 @@ def complete_job(root: Path, job_id: str, revision: str | None = None) -> dict[s
             now = _now()
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
-                "UPDATE jobs SET status = 'resolved', completed_revision = ?, updated_at = ? WHERE job_id = ? AND status = 'ready_for_review'",
-                (commit, now, job_id),
+                "UPDATE jobs SET status = 'resolved', completed_revision = ?, outcome = ?, updated_at = ? WHERE job_id = ? AND status = 'ready_for_review'",
+                (commit, proposal["outcome"], now, job_id),
             ).rowcount
             if changed != 1:
                 raise WikiError("invalid_state", "The job changed before the review result could be recorded.")

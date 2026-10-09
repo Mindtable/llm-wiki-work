@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -32,31 +33,6 @@ class MaintenanceTests(unittest.TestCase):
         else:
             manifest["authorship"] = authorship
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    def set_source_project(self, root, source_id, revision, project):
-        manifest_path = root / "sources" / "manifests" / f"{source_id}--{revision}.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        scope = manifest.setdefault("scope", {})
-        if project is None:
-            scope.pop("project", None)
-        else:
-            scope["project"] = project
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    def project_page(self, page_id, project=None, source_refs=None):
-        metadata = {
-            "id": page_id,
-            "title": page_id.replace("-", " ").title(),
-            "kind": "process",
-            "domain": "operations",
-            "review_status": "draft",
-            "source_refs": source_refs or [],
-            "depends_on": [],
-            "reviewed_at": None,
-        }
-        if project is not None:
-            metadata["scope"] = {"project": project}
-        return "---\n" + json.dumps(metadata) + "\n---\nProject-scoped page.\n"
 
     def set_source_project(self, root, source_id, revision, project):
         manifest_path = root / "sources" / "manifests" / f"{source_id}--{revision}.json"
@@ -553,6 +529,94 @@ class MaintenanceTests(unittest.TestCase):
         }
         self.assertEqual(list(statuses.values()).count("ready_for_review"), 1)
         self.assertEqual(list(statuses.values()).count("pending"), 1)
+
+    def test_targeted_run_claims_only_requested_pending_job_and_skips_raw_discovery(self):
+        from wiki_tools.feedback import _connect
+
+        root = self.make_root()
+        first = submit_feedback(root, dict(self.payload(), feedback_id="fb-target-first"))
+        target = submit_feedback(root, dict(self.payload(), feedback_id="fb-target-second"))
+        connection = _connect(root)
+        try:
+            connection.execute("UPDATE jobs SET created_at = ? WHERE job_id = ?", ("2026-01-01T00:00:00Z", first["job_id"]))
+            connection.execute("UPDATE jobs SET created_at = ? WHERE job_id = ?", ("2026-01-02T00:00:00Z", target["job_id"]))
+        finally:
+            connection.close()
+
+        seen = []
+
+        def execute(prompt):
+            envelope = json.loads(prompt.splitlines()[-1])
+            seen.append(envelope["job_id"])
+            return {"outcome": "needs_evidence", "summary": "More evidence is required.", "changes": [], "evidence": []}
+
+        with patch("wiki_tools.raw.discover_raw_sources", side_effect=AssertionError("targeted run must not scan raw")) as discover:
+            result = run_maintenance(root, execute, limit=5, job_id=target["job_id"])
+
+        discover.assert_not_called()
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(seen, [target["job_id"]])
+        connection = _connect(root)
+        try:
+            statuses = {
+                row["job_id"]: row["status"]
+                for row in connection.execute("SELECT job_id, status FROM jobs").fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertEqual(statuses[first["job_id"]], "pending")
+        self.assertEqual(statuses[target["job_id"]], "ready_for_review")
+
+    def test_targeted_run_rejects_missing_and_nonpending_jobs_without_retry(self):
+        from wiki_tools.feedback import _connect
+
+        for status in ("processing", "ready_for_review", "failed", "resolved"):
+            with self.subTest(status=status):
+                root = self.make_root()
+                submitted = submit_feedback(root, self.payload())
+                connection = _connect(root)
+                try:
+                    connection.execute("UPDATE jobs SET status = ? WHERE job_id = ?", (status, submitted["job_id"]))
+                finally:
+                    connection.close()
+                called = []
+                with self.assertRaises(WikiError) as rejected:
+                    run_maintenance(root, lambda prompt: called.append(prompt), job_id=submitted["job_id"])
+                self.assertEqual(rejected.exception.code, "invalid_state")
+                self.assertEqual(called, [])
+
+        root = self.make_root()
+        with self.assertRaises(WikiError) as missing:
+            run_maintenance(root, lambda prompt: self.fail("missing target must not execute"), job_id="f" * 32)
+        self.assertEqual(missing.exception.code, "job_not_found")
+
+    def test_completion_updates_job_outcome_from_edited_saved_proposal(self):
+        from wiki_tools.feedback import _connect
+
+        root = self.make_root()
+        self.register_evidence(root)
+        submitted = submit_feedback(root, self.payload())
+        run_maintenance(root, lambda prompt: self.proposal())
+        proposal_path = root / ".state" / "proposals" / f"{submitted['job_id']}.json"
+        edited = json.loads(proposal_path.read_text(encoding="utf-8"))
+        edited["outcome"] = "needs_evidence"
+        edited["summary"] = "The reviewer needs another source."
+        edited["changes"] = []
+        edited["evidence"] = []
+        proposal_path.write_text(json.dumps(edited), encoding="utf-8")
+
+        completed = complete_job(root, submitted["job_id"])
+
+        self.assertEqual(completed["outcome"], "needs_evidence")
+        connection = _connect(root)
+        try:
+            job = connection.execute("SELECT status, outcome, completed_revision FROM jobs WHERE job_id = ?", (submitted["job_id"],)).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(job["status"], "resolved")
+        self.assertEqual(job["outcome"], "needs_evidence")
+        self.assertIsNone(job["completed_revision"])
+        self.assertEqual(feedback_status(root, submitted["feedback_id"])["status"], "needs_evidence")
 
     def test_interrupted_processing_job_requires_explicit_recovery(self):
         from wiki_tools.feedback import _connect
