@@ -13,7 +13,7 @@ from typing import Any
 
 from .errors import WikiError
 from .raw import raw_drop_files
-from .sources import REVISION_RE, SOURCE_ID_RE, SOURCE_KINDS, get_manifest, safe_managed_path, source_tip
+from .sources import REVISION_RE, SOURCE_ID_RE, SOURCE_KINDS, get_manifest, safe_managed_path, source_authorship, source_tip
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".text", ".rst", ".json", ".yaml", ".yml", ".toml", ".py", ".xml", ".bpmn", ".dmn", ".csv", ".tsv", ".html", ".htm", ".log"}
@@ -397,6 +397,10 @@ def lint(root: Path) -> dict[str, list[dict[str, Any]]]:
         source_id, revision = match.group("source"), match.group("revision")
         if record.get("source_id") != source_id or record.get("revision") != revision:
             report["errors"].append({"code": "manifest_name_mismatch", "path": rel, "message": "Manifest filename does not match its source_id/revision."})
+        try:
+            source_authorship(record)
+        except WikiError as exc:
+            report["errors"].append({"code": exc.code, "path": rel, "message": exc.message})
         missing = {"source_id", "revision", "kind", "origin", "upstream_revision", "sha256", "captured_at", "local_path", "scope", "supersedes", "derived_from"} - record.keys()
         if missing:
             report["errors"].append({"code": "invalid_manifest", "path": rel, "message": "Missing fields: " + ", ".join(sorted(missing))})
@@ -592,6 +596,7 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
             "type": "source",
             "id": source_id,
             "kind": manifest.get("kind"),
+            "authorship": source_authorship(manifest),
             "path": local_path,
             "revision": current_revision,
             "locator": locator,
@@ -599,5 +604,12 @@ def search(root: Path, query: str) -> list[dict[str, Any]]:
             "score": score,
         })
 
-    results.sort(key=lambda item: (-item["score"], item["path"], item["id"]))
+    results.sort(
+        key=lambda item: (
+            -item["score"],
+            0 if item["type"] == "source" and item["authorship"] == "human-written" else 1,
+            item["path"],
+            item["id"],
+        )
+    )
     return results

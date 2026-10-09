@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import WikiError
-from .sources import SOURCE_ID_RE, ensure_managed_dir, get_manifest, safe_managed_path
+from .sources import SOURCE_ID_RE, ensure_managed_dir, get_manifest, safe_managed_path, source_authorship
 
 
 FEEDBACK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -180,7 +180,12 @@ def enqueue_ingest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
     if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
         raise WikiError("unsafe_source_id", "Invalid source_id.")
     manifest = get_manifest(root, source_id, revision)
-    payload = {"source_id": source_id, "revision": revision, "kind": manifest.get("kind")}
+    payload = {
+        "source_id": source_id,
+        "revision": revision,
+        "kind": manifest.get("kind"),
+        "authorship": source_authorship(manifest),
+    }
     encoded = _canonical(payload)
     connection = _connect(root)
     try:

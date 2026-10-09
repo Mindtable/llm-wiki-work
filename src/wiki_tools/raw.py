@@ -11,7 +11,7 @@ from typing import Iterator
 
 from .errors import WikiError
 from .feedback import enqueue_ingest
-from .sources import SOURCE_ID_RE, add_source, safe_managed_path
+from .sources import SOURCE_AUTHORSHIPS, SOURCE_ID_RE, add_source, safe_managed_path
 
 
 _TEMP_SUFFIXES = {".tmp", ".part", ".partial", ".download", ".crdownload", ".swp", ".swo"}
@@ -106,6 +106,19 @@ def raw_drop_id(relative_path: str) -> str:
     return "drop-" + hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
 
 
+def raw_drop_authorship(relative_path: str) -> str:
+    """Classify a raw drop only from its first directory below sources/raw/."""
+    parts = PurePosixPath(relative_path).parts
+    if (
+        len(parts) >= 4
+        and parts[:2] == ("sources", "raw")
+        and parts[2] in SOURCE_AUTHORSHIPS
+        and parts[2] != "unknown"
+    ):
+        return parts[2]
+    return "unknown"
+
+
 def raw_drop_files(root: Path) -> list[tuple[str, Path, str, str]]:
     """Return eligible drop paths with stable IDs and current content hashes."""
     base = _root(root)
@@ -148,6 +161,7 @@ def discover_raw_sources(root: Path) -> list[dict]:
                 source_id=source_id,
                 kind="unclassified",
                 origin=relative,
+                default_authorship=raw_drop_authorship(relative),
             )
             if manifest["revision"] != scanned_revision:
                 raise WikiError(

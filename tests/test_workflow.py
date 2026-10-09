@@ -270,6 +270,10 @@ class WorkflowIntegrationTests(unittest.TestCase):
                 }
             ],
         }
+        expected_stored_proposal = json.loads(json.dumps(maintenance_proposal))
+        self.assertNotIn("authorship", maintenance_proposal["evidence"][0])
+        expected_stored_proposal["evidence"][0]["authorship"] = "unknown"
+        self.assertEqual(expected_stored_proposal["evidence"][0]["authorship"], "unknown")
         responses_path.write_text(
             json.dumps(
                 {
@@ -322,7 +326,7 @@ class WorkflowIntegrationTests(unittest.TestCase):
         target_page = self.root / "wiki" / "processes" / "demo-process.md"
         self.assertFalse(target_page.exists(), "maintenance must only save a proposal")
         proposal_file = self.root / job["proposal_path"]
-        self.assertEqual(json.loads(proposal_file.read_text(encoding="utf-8")), maintenance_proposal)
+        self.assertEqual(json.loads(proposal_file.read_text(encoding="utf-8")), expected_stored_proposal)
 
         target_page.write_text(proposed_page, encoding="utf-8")
         reviewed_revision = self._commit_all("Publish reviewed process page")

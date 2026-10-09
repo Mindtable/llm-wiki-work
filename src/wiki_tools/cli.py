@@ -12,7 +12,7 @@ from typing import Any, TextIO
 from .config import load_config
 from .errors import WikiError
 from .runner import ask, run_opencode
-from .sources import SOURCE_KINDS
+from .sources import SOURCE_AUTHORSHIPS, SOURCE_KINDS
 
 
 class _HelpRequested(Exception):
@@ -51,6 +51,12 @@ def _build_parser() -> _JsonArgumentParser:
     )
     source_add.add_argument("--origin", default="")
     source_add.add_argument("--upstream-revision", default="")
+    source_add.add_argument(
+        "--authorship",
+        choices=sorted(SOURCE_AUTHORSHIPS),
+        default=None,
+        help="Authorship label for this source revision.",
+    )
 
     ingest = commands.add_parser("ingest", help="Queue a source for ingestion.")
     ingest.add_argument("source_id")
@@ -166,6 +172,7 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
             kind=args.kind,
             origin=args.origin,
             upstream_revision=args.upstream_revision,
+            authorship=args.authorship,
         )
     if args.command == "ingest":
         from .feedback import enqueue_ingest

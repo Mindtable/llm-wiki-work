@@ -165,6 +165,50 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(value, result)
 
+    def test_source_add_authorship_flag_is_validated_and_propagated(self):
+        source_file = self.outside / "draft.md"
+        source_file.write_text("A draft.\n", encoding="utf-8")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main([
+                "--root", str(self.root), "source", "add", str(source_file),
+                "--id", "cli-draft", "--kind", "unclassified", "--authorship", "ai-generated",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue())["authorship"], "ai-generated")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            default_exit = main([
+                "--root", str(self.root), "source", "add", str(source_file),
+                "--id", "cli-default", "--kind", "unclassified",
+            ])
+        self.assertEqual(default_exit, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue())["authorship"], "unknown")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            invalid_exit = main([
+                "--root", str(self.root), "source", "add", str(source_file),
+                "--id", "cli-invalid", "--kind", "unclassified", "--authorship", "machine-written",
+            ])
+        self.assertNotEqual(invalid_exit, 0)
+        invalid = self.assert_one_json_line(stdout.getvalue())
+        self.assertEqual(invalid["error"]["code"], "argument_error")
+
+    def test_source_add_help_documents_authorship_in_english(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "source", "add", "--help"])
+
+        self.assertEqual(exit_code, 0)
+        help_text = self.assert_one_json_line(stdout.getvalue())["help"]
+        self.assertIn("--authorship", help_text)
+        self.assertIn("human-written", help_text)
+        self.assertIn("ai-generated", help_text)
+        self.assertIn("unknown", help_text)
+        self.assertIn("Authorship", help_text)
 
 if __name__ == "__main__":
     unittest.main()

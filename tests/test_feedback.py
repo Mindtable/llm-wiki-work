@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from wiki_tools.errors import WikiError
-from wiki_tools.feedback import enqueue_ingest, feedback_status, submit_feedback
+from wiki_tools.feedback import _connect, enqueue_ingest, feedback_status, submit_feedback
 from wiki_tools.sources import add_source
 
 
@@ -58,10 +59,16 @@ class FeedbackQueueTests(unittest.TestCase):
 
         incoming = root / "procedure.md"
         incoming.write_text("Start processing only after approval.\n", encoding="utf-8")
-        registered = add_source(root, incoming, source_id="procedure", kind="procedure")
+        registered = add_source(root, incoming, source_id="procedure", kind="unclassified", authorship="ai-generated")
         first = enqueue_ingest(root, "procedure", registered["revision"])
         repeated = enqueue_ingest(root, "procedure", registered["revision"])
         self.assertEqual(first["job_id"], repeated["job_id"])
+        connection = _connect(root)
+        try:
+            queued_payload = json.loads(connection.execute("SELECT payload FROM jobs WHERE job_id = ?", (first["job_id"],)).fetchone()["payload"])
+        finally:
+            connection.close()
+        self.assertEqual(queued_payload["authorship"], "ai-generated")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,8 @@ sys.path.insert(0, str(REPO / "src"))
 from wiki_tools.errors import WikiError
 from wiki_tools.feedback import _connect
 from wiki_tools.knowledge import lint, search
+from wiki_tools.raw import discover_raw_sources
+from wiki_tools import sources as sources_module
 from wiki_tools.sources import get_manifest
 
 
@@ -133,6 +136,56 @@ class RawDropTests(unittest.TestCase):
             search(self.root, "Version A")
 
         self.assertEqual(caught.exception.code, "historical_revision")
+        self.assertEqual(len(self.jobs()), 2)
+
+    def test_raw_drop_authorship_uses_only_the_first_bucket_directory(self):
+        raw = self.root / "sources" / "raw"
+        ai = raw / "ai-generated" / "project" / "human-written" / "draft.md"
+        human = raw / "human-written" / "project" / "ai-generated" / "approved.md"
+        unknown_nested = raw / "other" / "ai-generated" / "notes.md"
+        unknown_root = raw / "direct.md"
+        for path, content in (
+            (ai, "AI working draft.\n"),
+            (human, "Human-reviewed note.\n"),
+            (unknown_nested, "Unclassified note.\n"),
+            (unknown_root, "Root-level drop.\n"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        manifests = discover_raw_sources(self.root)
+        authorship_by_origin = {manifest["origin"]: sources_module.source_authorship(manifest) for manifest in manifests}
+
+        self.assertEqual(authorship_by_origin[ai.relative_to(self.root).as_posix()], "ai-generated")
+        self.assertEqual(authorship_by_origin[human.relative_to(self.root).as_posix()], "human-written")
+        self.assertEqual(authorship_by_origin[unknown_nested.relative_to(self.root).as_posix()], "unknown")
+        self.assertEqual(authorship_by_origin[unknown_root.relative_to(self.root).as_posix()], "unknown")
+        self.assertTrue(all(manifest["kind"] == "unclassified" for manifest in manifests))
+        for path in (ai, human, unknown_nested, unknown_root):
+            self.assertTrue(path.is_file())
+
+    def test_legacy_manifest_in_bucket_stays_unknown_without_rewrite_and_changed_bytes_use_bucket(self):
+        dropped = self.root / "sources" / "raw" / "ai-generated" / "old" / "policy.md"
+        dropped.parent.mkdir(parents=True)
+        dropped.write_text("Original bytes.\n", encoding="utf-8")
+        first = discover_raw_sources(self.root)[0]
+        manifest_path = self.root / "sources" / "manifests" / f"{first['source_id']}--{first['revision']}.json"
+        legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+        legacy.pop("authorship")
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+        legacy_manifest_bytes = manifest_path.read_bytes()
+
+        repeated = discover_raw_sources(self.root)[0]
+
+        self.assertEqual(sources_module.source_authorship(repeated), "unknown")
+        self.assertEqual(manifest_path.read_bytes(), legacy_manifest_bytes)
+        self.assertEqual(len(self.jobs()), 1)
+
+        dropped.write_text("Changed bytes.\n", encoding="utf-8")
+        changed = discover_raw_sources(self.root)[0]
+        self.assertNotEqual(changed["revision"], first["revision"])
+        self.assertEqual(changed["supersedes"], first["revision"])
+        self.assertEqual(sources_module.source_authorship(changed), "ai-generated")
         self.assertEqual(len(self.jobs()), 2)
 
 

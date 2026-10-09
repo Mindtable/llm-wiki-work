@@ -23,6 +23,15 @@ class KnowledgeTests(unittest.TestCase):
         (root / "sources" / "manifests").mkdir(parents=True)
         return root
 
+    def set_authorship(self, root, source, authorship):
+        manifest_path = root / "sources" / "manifests" / f"{source['source_id']}--{source['revision']}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if authorship is None:
+            manifest.pop("authorship", None)
+        else:
+            manifest["authorship"] = authorship
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_search_returns_matching_page_and_registered_source_with_locators(self):
         root = self.make_root()
         page = root / "wiki" / "processes" / "refund.md"
@@ -162,6 +171,59 @@ class KnowledgeTests(unittest.TestCase):
         result = search(root, "current authorization")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["revision"], current["revision"])
+
+    def test_search_exposes_authorship_and_uses_it_only_to_break_score_ties(self):
+        root = self.make_root()
+        sources = [
+            ("strong-ai", "Approval. Approval. Approval.", "ai-generated"),
+            ("tie-ai", "Approval.", "ai-generated"),
+            ("tie-human", "Approval.", "human-written"),
+            ("tie-unknown", "Approval.", None),
+        ]
+        for source_id, content, authorship in sources:
+            incoming = root / f"{source_id}.md"
+            incoming.write_text(content + "\n", encoding="utf-8")
+            source = add_source(root, incoming, source_id=source_id, kind="unclassified")
+            self.set_authorship(root, source, authorship)
+
+        page = root / "wiki" / "processes" / "approval.md"
+        page.write_text("# Approval\nApproval.\n", encoding="utf-8")
+
+        results = search(root, "approval")
+        source_results = [item for item in results if item["type"] == "source"]
+
+        self.assertEqual(
+            [item["id"] for item in source_results],
+            ["strong-ai", "tie-human", "tie-ai", "tie-unknown"],
+        )
+        self.assertEqual(
+            {item["id"]: item["authorship"] for item in source_results},
+            {
+                "strong-ai": "ai-generated",
+                "tie-human": "human-written",
+                "tie-ai": "ai-generated",
+                "tie-unknown": "unknown",
+            },
+        )
+        page_result = next(item for item in results if item["type"] == "wiki_page")
+        self.assertNotIn("authorship", page_result)
+
+    def test_lint_accepts_legacy_authorship_as_unknown_and_rejects_invalid_metadata(self):
+        root = self.make_root()
+        incoming = root / "legacy.md"
+        incoming.write_text("Legacy source content.\n", encoding="utf-8")
+        source = add_source(root, incoming, source_id="legacy-source", kind="unclassified")
+        self.set_authorship(root, source, None)
+
+        result = search(root, "legacy source")
+        self.assertEqual(result[0]["authorship"], "unknown")
+        self.assertEqual(lint(root)["errors"], [])
+
+        for invalid in ("machine-written", 42, ["ai-generated"]):
+            with self.subTest(authorship=invalid):
+                self.set_authorship(root, source, invalid)
+                report = lint(root)
+                self.assertIn("invalid_manifest", {item["code"] for item in report["errors"]})
 
 
 if __name__ == "__main__":

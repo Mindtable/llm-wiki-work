@@ -16,7 +16,7 @@ from typing import Any, Callable
 from .errors import WikiError
 from .feedback import _connect, _now
 from .knowledge import validate_page_document, validate_source_reference
-from .sources import ensure_managed_dir, safe_managed_path
+from .sources import ensure_managed_dir, get_manifest, safe_managed_path, source_authorship
 
 
 COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -94,11 +94,13 @@ def _claim_next(root: Path) -> dict[str, Any] | None:
         connection.close()
 
 
-def _make_prompt(job: dict[str, Any]) -> str:
+def _make_prompt(job: dict[str, Any], root: Path) -> str:
     if job["job_type"] == "ingest":
         operation = "ingest_source"
         directions = "Read the registered source revision and prepare an evidence-backed proposal for the wiki."
         payload = json.loads(job["payload"])
+        manifest = get_manifest(root, payload["source_id"], payload["revision"])
+        payload["authorship"] = source_authorship(manifest)
     else:
         operation = "review_feedback"
         directions = "Review the feedback against registered sources and prepare a proposal for manual review."
@@ -114,7 +116,8 @@ def _make_prompt(job: dict[str, Any]) -> str:
             "evidence": [{"source_id": "registered-id", "revision": "sha256", "locator": "line:1"}],
         },
     }
-    return directions + "\nReturn a single JSON object that follows the contract. Do not write files or publish changes.\n" + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+    trust_note = "Treat AI-generated sources as lower evidential weight than comparable human-written sources; authorship alone does not establish truth."
+    return directions + "\n" + trust_note + "\nReturn a single JSON object that follows the contract. Do not write files or publish changes.\n" + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
 
 
 def _validate_evidence(root: Path, evidence: Any, outcome: str) -> list[dict[str, Any]]:
@@ -133,7 +136,12 @@ def _validate_evidence(root: Path, evidence: Any, outcome: str) -> list[dict[str
             manifest, _ = validate_source_reference(root, source_id, revision, locator, item.get("wiki_page"))
         except WikiError as exc:
             raise WikiError("invalid_proposal", f"Evidence {source_id}@{revision} failed validation: {exc.message}") from exc
-        citation: dict[str, Any] = {"source_id": source_id, "revision": revision, "locator": locator}
+        citation: dict[str, Any] = {
+            "source_id": source_id,
+            "revision": revision,
+            "locator": locator,
+            "authorship": source_authorship(manifest),
+        }
         for optional in ("supports", "note"):
             if optional in item:
                 if not isinstance(item[optional], str):
@@ -293,7 +301,7 @@ def run_maintenance(root: Path, execute: Callable[[str], dict], limit: int = 1) 
             if job is None:
                 break
             try:
-                raw_proposal = execute(_make_prompt(job))
+                raw_proposal = execute(_make_prompt(job, base))
                 proposal = _validate_proposal(base, raw_proposal)
                 proposal_path = _write_proposal(base, job["job_id"], proposal)
                 _mark_ready(base, job, proposal, proposal_path)

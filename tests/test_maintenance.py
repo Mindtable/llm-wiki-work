@@ -24,6 +24,15 @@ class MaintenanceTests(unittest.TestCase):
         (root / "wiki" / "processes").mkdir(parents=True)
         return root
 
+    def set_source_authorship(self, root, source_id, revision, authorship):
+        manifest_path = root / "sources" / "manifests" / f"{source_id}--{revision}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if authorship is None:
+            manifest.pop("authorship", None)
+        else:
+            manifest["authorship"] = authorship
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def payload(self):
         return {
             "feedback_id": "fb-maintenance-1",
@@ -60,7 +69,14 @@ class MaintenanceTests(unittest.TestCase):
         evidence_path = root / "evidence.md"
         evidence_path.write_text("Approved refunds are logged.\n", encoding="utf-8")
         source = add_source(root, evidence_path, source_id="refund-procedure", kind="procedure")
-        self.evidence = [{"source_id": "refund-procedure", "revision": source["revision"], "locator": "line:1"}]
+        self.evidence = [
+            {
+                "source_id": "refund-procedure",
+                "revision": source["revision"],
+                "locator": "line:1",
+                "authorship": source["authorship"],
+            }
+        ]
 
     def test_run_saves_proposal_for_review_without_writing_wiki(self):
         root = self.make_root()
@@ -109,6 +125,62 @@ class MaintenanceTests(unittest.TestCase):
             connection.close()
         self.assertEqual([(row["job_type"], row["status"]) for row in jobs], [("ingest", "ready_for_review")])
         self.assertEqual(dropped.read_text(encoding="utf-8"), "A second reviewer checks payment approval.\n")
+
+    def test_legacy_ingest_job_prompt_looks_up_manifest_authorship(self):
+        from wiki_tools.feedback import _connect, enqueue_ingest
+
+        root = self.make_root()
+        self.register_evidence(root)
+        source_id = self.evidence[0]["source_id"]
+        revision = self.evidence[0]["revision"]
+        self.set_source_authorship(root, source_id, revision, None)
+        queued = enqueue_ingest(root, source_id, revision)
+
+        connection = _connect(root)
+        try:
+            legacy_payload = {"source_id": source_id, "revision": revision, "kind": "procedure"}
+            connection.execute(
+                "UPDATE jobs SET payload = ? WHERE job_id = ?",
+                (json.dumps(legacy_payload), queued["job_id"]),
+            )
+        finally:
+            connection.close()
+
+        seen = []
+
+        def execute(prompt):
+            seen.append(prompt)
+            return {"outcome": "needs_evidence", "summary": "No change is proposed.", "changes": [], "evidence": []}
+
+        run_maintenance(root, execute)
+        envelope = json.loads(seen[0].splitlines()[-1])
+        self.assertEqual(envelope["payload"]["authorship"], "unknown")
+
+    def test_proposal_evidence_uses_manifest_authorship_and_revalidates_on_completion(self):
+        root = self.make_root()
+        self.register_evidence(root)
+        source_id = self.evidence[0]["source_id"]
+        revision = self.evidence[0]["revision"]
+        self.set_source_authorship(root, source_id, revision, "ai-generated")
+        forged = dict(self.evidence[0], authorship="human-written")
+        proposal = {
+            "outcome": "rejected",
+            "summary": "The request is not supported by the cited source.",
+            "changes": [],
+            "evidence": [forged],
+        }
+        submitted = submit_feedback(root, self.payload())
+
+        result = run_maintenance(root, lambda prompt: proposal)
+
+        self.assertEqual(result["items"][0]["status"], "ready_for_review")
+        proposal_path = root / ".state" / "proposals" / f"{submitted['job_id']}.json"
+        saved = json.loads(proposal_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["evidence"][0]["authorship"], "ai-generated")
+
+        completed = complete_job(root, submitted["job_id"])
+        self.assertEqual(completed["status"], "resolved")
+        self.assertEqual(feedback_status(root, submitted["feedback_id"])["status"], "rejected")
 
     def test_executor_failure_and_invalid_proposal_fail_durably_and_retry_is_explicit(self):
         for executor in (lambda prompt: (_ for _ in ()).throw(RuntimeError("temporary outage")), lambda prompt: {"outcome": "proposed"}):

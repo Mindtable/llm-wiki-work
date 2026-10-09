@@ -31,11 +31,11 @@ This is the primary test for automatic discovery. The user copies a file through
 
 2. Send the calling agent an ordinary message, such as: “Ask the librarian: what storage location is listed for `manual-drop-key-742`? Include an exact quote and explain what follows from this record.” Alternatively, call `/wiki-ask` with the same question. Automatically discovered material receives manifest kind `unclassified` because no kind has been declared. This does not prevent its contents from being described, but its presence in the directory does not establish independent review, approval, or applicability as policy.
 
-   Expect an answer quoting the source, with a `source_id` of the form `drop-<sha256 UTF-8 relative POSIX path>`, a SHA-256 `revision`, and a `line:<n>` locator. If the librarian infers an apparent kind from the text, it must identify that as an inference and preserve the manifest kind `unclassified`. If there is no evidence for a claim that a policy is approved or in force, leave it `unknown` and explain the gap.
+   Expect an answer quoting the source, with a `source_id` of the form `drop-<sha256 UTF-8 relative POSIX path>`, a SHA-256 `revision`, a `line:<n>` locator, and `citation.authorship: unknown`. If the librarian infers an apparent kind from the text, it must identify that as an inference and preserve the manifest kind `unclassified`. If there is no evidence for a claim that a policy is approved or in force, leave it `unknown` and explain the gap.
 
 3. Immediately after the answer, before any separate `wiki search`, check the manifest and queue entry. This confirms that discovery happened during the ordinary ask and that a search did not compensate for a missed step.
 
-   The manifest at `sources/manifests/<source_id>--<revision>.json` should point in `origin` to the original path `sources/raw/manual-drop-2026-10-04.md`, point in `local_path` to the hash-named snapshot under `sources/raw/<source_id>/`, and have a `sha256` matching `revision`. Compare the snapshot bytes with the original file. The original remains in place and editable; the snapshot is immutable. The manifest has `kind: unclassified`. Discovery creates one ingest job but does not publish a wiki page.
+   The manifest at `sources/manifests/<source_id>--<revision>.json` should point in `origin` to the original path `sources/raw/manual-drop-2026-10-04.md`, point in `local_path` to the hash-named snapshot under `sources/raw/<source_id>/`, and have a `sha256` matching `revision`. Compare the snapshot bytes with the original file. The original remains in place and editable; the snapshot is immutable. The manifest has `kind: unclassified` and `authorship: unknown` because the file is directly under `sources/raw/`. Discovery creates one ingest job but does not publish a wiki page.
 
    To check the queue, replace the two Python strings with the values from the manifest and run this read-only query:
 
@@ -63,7 +63,7 @@ This is the primary test for automatic discovery. The user copies a file through
    uv run --locked wiki --root . search manual-drop-key-742
    ```
 
-   The result should include `type: source`, `kind: unclassified`, the ID, revision, and locator.
+   The result should include `type: source`, `kind: unclassified`, an `authorship: unknown` field, the ID, revision, and locator.
 
 5. Repeat the ordinary question and search. The ID and revision should remain the same; repeat discovery should not create a second job.
 
@@ -146,7 +146,7 @@ This scenario checks that an external calling agent can save reusable research w
 2. Register the note with a project-namespaced ID and origin:
 
    ```sh
-   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/notes/project-alpha-refund.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --origin research:project-alpha/refund
+   uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" source add "/absolute/path/to/notes/project-alpha-refund.md" --id research-project-alpha-refund-checkpoint-01 --kind unclassified --authorship ai-generated --origin research:project-alpha/refund
    ```
 
    Capture the returned `source_id` and `revision`. If the exact upstream commit is known, it may be supplied with `--upstream-revision ACTUAL_COMMIT`; do not guess it.
@@ -157,9 +157,9 @@ This scenario checks that an external calling agent can save reusable research w
    uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID ACTUAL_REVISION
    ```
 
-   Inspect the manifest and snapshot: the kind is `unclassified`, the origin identifies the project/topic, and the snapshot bytes and SHA-256 match the saved note. Check `.state/queue.sqlite3` read-only for exactly one ingest row matching the returned source ID and revision. Search for a unique phrase from the note and confirm the result carries the source ID, revision, and locator.
+   Inspect the manifest and snapshot: the kind is `unclassified`, authorship is `ai-generated`, the origin identifies the project/topic, and the snapshot bytes and SHA-256 match the saved note. Check `.state/queue.sqlite3` read-only for exactly one ingest row matching the returned source ID and revision. Search for a unique phrase from the note and confirm the result carries the source ID, revision, locator, and a flat `authorship` field.
 
-4. Restart the external agent and repeat registration with the identical note bytes, ID, and origin, then repeat ingestion. The manifest/revision and job ID should be unchanged, with one matching queue row. Edit the note under the same ID, preserving earlier useful observations, and register it again. Queue the newly returned revision:
+4. Restart the external agent and repeat registration with the identical note bytes, ID, origin, and `--authorship ai-generated`, then repeat ingestion. The manifest/revision and job ID should be unchanged, with one matching queue row. Repeat the registration without `--authorship`; it should preserve the recorded value. Edit the note under the same ID, preserving earlier useful observations, and register it again with `--authorship ai-generated`. Queue the newly returned revision:
 
    ```sh
    uv run --project "$LLM_WIKI_ROOT" --locked wiki --root "$LLM_WIKI_ROOT" ingest ACTUAL_SOURCE_ID NEW_REVISION
@@ -167,4 +167,17 @@ This scenario checks that an external calling agent can save reusable research w
 
    Confirm the new revision's `supersedes` points to the previous revision, the prior snapshot remains on disk, exactly one job exists for the new source ID/revision pair, and search retrieves the new current revision. For a second project researching the same topic, use a distinct project namespace and source ID.
 
-5. In an optional live model check, include the project ID/name in the question text. The supported `ask` scope has only `process`, `product`, `environment`, and `version`; there is no `scope.project` or wiki project filter. The `uv --project` flag selects the Python environment only. This retrieval check requires configured OpenCode, a model, and provider authorization; mark it not run until it has actually been exercised. If the note was instead placed in `sources/raw/`, allow the next `ask` or `search` to discover it and do not also run `source add` on the same file.
+5. In an optional live model check, include the project ID/name in the question text. The supported `ask` scope has only `process`, `product`, `environment`, and `version`; there is no `scope.project` or wiki project filter. The `uv --project` flag selects the Python environment only. This retrieval check requires configured OpenCode, a model, and provider authorization; mark it not run until it has actually been exercised. If the note was instead placed in `sources/raw/ai-generated/`, allow the next `ask` or `search` to discover it and do not also run `source add` on the same file.
+
+## Source Authorship Labels
+
+Use a disposable repository copy. These checks verify declared provenance, not a detector of who wrote the text.
+
+1. Create two test fixtures with identical UTF-8 contents and a unique search phrase, one under `sources/raw/ai-generated/project-alpha/` and one under `sources/raw/human-written/project-alpha/`. Their folder labels are test inputs, not claims about real-world authorship. Create two more copies directly under `sources/raw/` and under `sources/raw/project-alpha/`. Trigger ordinary `wiki search` for the phrase. Check the manifests and search results: the first pair must have `authorship: ai-generated` and `authorship: human-written`, while the other paths must be `unknown`. All four sources may remain `kind: unclassified`; kind and authorship are independent. Folder placement is a declaration, not verification.
+2. Confirm each source search result exposes a flat `authorship` field alongside `type: source`. Because the first pair has identical text, their lexical relevance is tied and the human-written result should appear first. For a query where relevance differs, a more relevant result must still rank above a less relevant human-written result. `unknown` must not receive the human-written tie preference.
+3. Use the research-note registration from the previous section, which passes `--authorship ai-generated`. Create one additional explicit source without the option and confirm that a new source defaults to `authorship: unknown`. Register a separate manual source as `human-written`, change its bytes under the same source ID, and register that changed revision without `--authorship`; the new revision should be `unknown` and its `supersedes` should reference the earlier one. Re-register the agent-authored source with the same current bytes and source ID but explicit `--authorship human-written`. Expect `source_metadata_conflict`; verify the existing manifest and snapshot remain unchanged.
+
+   In a separate temporary copy, place a legacy imported note at `sources/raw/ai-generated/legacy-note.md` with a manifest created before authorship existed. Trigger discovery repeatedly: the existing revision must remain `unknown`, without `source_metadata_conflict` or a manifest rewrite, despite the folder label. Change the note bytes at that path and discover again; the new revision should receive `ai-generated` from the folder. Lint and search should continue to interpret the legacy revision as `unknown`.
+4. Move a discovered file from the `ai-generated` raw bucket to the `human-written` bucket and run discovery again. The new path should produce a different path-based source ID with `human-written`; the old manifest and snapshot remain `ai-generated`. The move must not relabel or remove the old source. Correcting a label requires an explicit new source version or source ID.
+5. Create a test knowledge page citing the AI-generated source and manually review it. Confirm the source manifest and search/citation metadata still say `ai-generated`; a reviewed page or human approval does not upgrade the source. Do not add an authorship field to page metadata or model-produced citation JSON; Python supplies it from the manifest.
+6. Optional live trust checks require configured OpenCode and a model. Ask about an external fact present only in an AI-generated note: the fact should remain `inferred` or `unknown`, while the limited statement “the note reports X” may be `supported` with a citation. Add an applicable human primary source that conflicts with an AI summary: the answer should give the primary evidence greater weight but preserve the conflict rather than automatically selecting a winner based only on authorship. Copies or rewrites of the same AI material must not count as independent corroboration. Mark these live checks not run until actually exercised.

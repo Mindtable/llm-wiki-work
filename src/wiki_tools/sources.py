@@ -16,9 +16,22 @@ from .errors import WikiError
 
 
 SOURCE_KINDS = {"workflow", "procedure", "confluence_export", "code_summary", "code_excerpt", "unclassified"}
+SOURCE_AUTHORSHIPS = {"human-written", "ai-generated", "unknown"}
 SOURCE_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 REVISION_RE = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9]{1,12}\Z")
+
+
+def source_authorship(manifest: dict[str, Any]) -> str:
+    """Return a revision's declared authorship, treating legacy data as unknown."""
+    if not isinstance(manifest, dict):
+        raise WikiError("invalid_manifest", "Manifest must be a JSON object.")
+    if "authorship" not in manifest:
+        return "unknown"
+    authorship = manifest["authorship"]
+    if not isinstance(authorship, str) or authorship not in SOURCE_AUTHORSHIPS:
+        raise WikiError("invalid_manifest", "Manifest authorship must be human-written, ai-generated, or unknown.")
+    return authorship
 
 
 def _root_path(root: Path) -> Path:
@@ -99,6 +112,7 @@ def get_manifest(root: Path, source_id: str, revision: str) -> dict[str, Any]:
         raise WikiError("invalid_manifest", f"Manifest ID does not match its filename: {path.name}.")
     if manifest.get("sha256") != revision:
         raise WikiError("invalid_manifest", f"sha256 does not match revision in manifest {path.name}.")
+    manifest["authorship"] = source_authorship(manifest)
     if not isinstance(manifest.get("kind"), str) or manifest.get("kind") not in SOURCE_KINDS:
         raise WikiError("invalid_manifest", f"Invalid kind in manifest {path.name}.")
     if not isinstance(manifest.get("origin"), str) or not isinstance(manifest.get("upstream_revision"), str):
@@ -183,12 +197,18 @@ def add_source(
     kind: str,
     origin: str = "",
     upstream_revision: str = "",
+    authorship: str | None = None,
+    default_authorship: str = "unknown",
 ) -> dict[str, Any]:
     """Register a new immutable source snapshot or reuse an identical one."""
     if not isinstance(source_id, str) or not SOURCE_ID_RE.fullmatch(source_id):
         raise WikiError("unsafe_source_id", "source_id must be a lowercase ASCII slug.")
     if not isinstance(kind, str) or kind not in SOURCE_KINDS:
         raise WikiError("invalid_source_kind", f"Unknown source kind: {kind}.")
+    if authorship is not None and (not isinstance(authorship, str) or authorship not in SOURCE_AUTHORSHIPS):
+        raise WikiError("invalid_authorship", "authorship must be human-written, ai-generated, or unknown.")
+    if not isinstance(default_authorship, str) or default_authorship not in SOURCE_AUTHORSHIPS:
+        raise WikiError("invalid_authorship", "default_authorship must be human-written, ai-generated, or unknown.")
     source_path = Path(path).expanduser()
     if not source_path.exists() or not source_path.is_file():
         raise WikiError("source_not_found", f"Source file not found: {source_path}.")
@@ -199,7 +219,17 @@ def add_source(
 
     root_path = _root_path(root)
     with _source_lock(root_path, source_id):
-        return _add_source_locked(root_path, content, source_path, source_id, kind, origin, upstream_revision)
+        return _add_source_locked(
+            root_path,
+            content,
+            source_path,
+            source_id,
+            kind,
+            origin,
+            upstream_revision,
+            authorship,
+            default_authorship,
+        )
 
 
 def _add_source_locked(
@@ -210,6 +240,8 @@ def _add_source_locked(
     kind: str,
     origin: str,
     upstream_revision: str,
+    authorship: str | None,
+    default_authorship: str,
 ) -> dict[str, Any]:
     revision = hashlib.sha256(content).hexdigest()
     ensure_managed_dir(root_path, f"sources/raw/{source_id}")
@@ -230,6 +262,12 @@ def _add_source_locked(
             raise WikiError(
                 "historical_revision",
                 f"These bytes are already registered as an older revision; the current revision is {current_revision}.",
+            )
+        persisted_authorship = source_authorship(validated)
+        if authorship is not None and authorship != persisted_authorship:
+            raise WikiError(
+                "source_metadata_conflict",
+                f"Revision {source_id}@{revision} is already labeled {persisted_authorship}; create a new revision to change authorship.",
             )
         return validated
 
@@ -253,6 +291,7 @@ def _add_source_locked(
         "source_id": source_id,
         "revision": revision,
         "kind": kind,
+        "authorship": authorship if authorship is not None else default_authorship,
         "origin": str(origin),
         "upstream_revision": str(upstream_revision),
         "sha256": revision,

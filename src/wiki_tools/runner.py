@@ -19,6 +19,7 @@ from typing import BinaryIO
 from .config import RunConfig, load_config
 from .errors import WikiError
 from .raw import is_ignored_raw_name, is_managed_raw_snapshot
+from .sources import source_authorship
 
 
 _MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -514,7 +515,7 @@ def _validate_answer(root: Path, answer: object) -> dict:
             raise WikiError("answer_validation_error", "Source reference validation is unavailable.") from exc
         for citation in validated_citations:
             try:
-                validate_source_reference(
+                manifest, _ = validate_source_reference(
                     root,
                     citation["source_id"],
                     citation["revision"],
@@ -523,6 +524,7 @@ def _validate_answer(root: Path, answer: object) -> dict:
                 )
             except WikiError as exc:
                 raise WikiError("answer_validation_error", f"Invalid citation: {exc.message}.") from exc
+            citation["authorship"] = source_authorship(manifest)
 
     return {
         "scope": dict(scope),

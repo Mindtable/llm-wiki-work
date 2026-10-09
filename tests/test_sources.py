@@ -8,8 +8,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from wiki_tools import sources as sources_module
 from wiki_tools.errors import WikiError
-from wiki_tools.sources import add_source, source_tip
+from wiki_tools.sources import add_source, get_manifest, source_tip
 
 
 class SourceRegistryTests(unittest.TestCase):
@@ -153,6 +154,92 @@ class SourceRegistryTests(unittest.TestCase):
 
         report = lint(root)
         self.assertIn("unsafe_path", {item["code"] for item in report["errors"]})
+
+    def test_authorship_contract_and_legacy_manifest_normalize_in_memory_only(self):
+        self.assertEqual(
+            sources_module.SOURCE_AUTHORSHIPS,
+            {"human-written", "ai-generated", "unknown"},
+        )
+        self.assertEqual(sources_module.source_authorship({}), "unknown")
+        for invalid in ("machine-written", None, 4, [], {}):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(WikiError) as caught:
+                    sources_module.source_authorship({"authorship": invalid})
+                self.assertEqual(caught.exception.code, "invalid_manifest")
+
+        root = self.make_root()
+        incoming = root / "legacy.md"
+        incoming.write_text("Legacy source.\n", encoding="utf-8")
+        registered = add_source(root, incoming, source_id="legacy-source", kind="unclassified")
+        manifest_path = root / "sources" / "manifests" / f"legacy-source--{registered['revision']}.json"
+        legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+        legacy.pop("authorship", None)
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+        original_manifest_bytes = manifest_path.read_bytes()
+
+        loaded = get_manifest(root, "legacy-source", registered["revision"])
+
+        self.assertEqual(loaded["authorship"], "unknown")
+        self.assertEqual(sources_module.source_authorship(loaded), "unknown")
+        self.assertEqual(manifest_path.read_bytes(), original_manifest_bytes)
+
+    def test_current_identical_import_reuses_authorship_and_conflict_preserves_disk(self):
+        root = self.make_root()
+        incoming = root / "draft.md"
+        incoming.write_text("Authorship stays with this exact revision.\n", encoding="utf-8")
+
+        first = add_source(root, incoming, source_id="labeled-source", kind="unclassified", authorship="ai-generated")
+        repeated_without_declaration = add_source(root, incoming, source_id="labeled-source", kind="unclassified")
+        repeated_with_same_declaration = add_source(
+            root, incoming, source_id="labeled-source", kind="unclassified", authorship="ai-generated"
+        )
+        self.assertEqual(first["authorship"], "ai-generated")
+        self.assertEqual(repeated_without_declaration["authorship"], "ai-generated")
+        self.assertEqual(repeated_with_same_declaration["authorship"], "ai-generated")
+
+        manifest_path = root / "sources" / "manifests" / f"labeled-source--{first['revision']}.json"
+        snapshot_path = root / first["local_path"]
+        manifest_before = manifest_path.read_bytes()
+        snapshot_before = snapshot_path.read_bytes()
+        with self.assertRaises(WikiError) as caught:
+            add_source(root, incoming, source_id="labeled-source", kind="unclassified", authorship="human-written")
+        self.assertEqual(caught.exception.code, "source_metadata_conflict")
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self.assertEqual(snapshot_path.read_bytes(), snapshot_before)
+        self.assertEqual(len(list((root / "sources" / "manifests").glob("*.json"))), 1)
+
+    def test_authorship_defaults_to_unknown_for_new_revisions_and_does_not_inherit(self):
+        root = self.make_root()
+        incoming = root / "source.md"
+        incoming.write_text("First bytes.\n", encoding="utf-8")
+        first = add_source(root, incoming, source_id="versioned-source", kind="unclassified", authorship="human-written")
+        self.assertEqual(first["authorship"], "human-written")
+
+        incoming.write_text("Changed bytes without a declaration.\n", encoding="utf-8")
+        second = add_source(root, incoming, source_id="versioned-source", kind="unclassified")
+        self.assertNotEqual(first["revision"], second["revision"])
+        self.assertEqual(second["supersedes"], first["revision"])
+        self.assertEqual(second["authorship"], "unknown")
+
+        incoming.write_text("A later declared AI draft.\n", encoding="utf-8")
+        third = add_source(root, incoming, source_id="versioned-source", kind="unclassified", authorship="ai-generated")
+        self.assertEqual(third["authorship"], "ai-generated")
+
+    def test_add_source_rejects_invalid_authorship_declarations(self):
+        root = self.make_root()
+        incoming = root / "source.md"
+        incoming.write_text("A source.\n", encoding="utf-8")
+        for invalid in ("generated", 4, [], {}):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(WikiError) as caught:
+                    add_source(root, incoming, source_id="source", kind="unclassified", authorship=invalid)
+                self.assertEqual(caught.exception.code, "invalid_authorship")
+
+        for invalid in ("generated", 4, [], {}):
+            with self.subTest(default_authorship=invalid):
+                with self.assertRaises(WikiError) as caught:
+                    add_source(root, incoming, source_id="source", kind="unclassified", default_authorship=invalid)
+                self.assertEqual(caught.exception.code, "invalid_authorship")
 
 
 if __name__ == "__main__":

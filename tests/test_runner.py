@@ -14,6 +14,7 @@ from unittest.mock import patch
 from wiki_tools.config import RunConfig
 from wiki_tools.errors import WikiError
 from wiki_tools.runner import ask, run_opencode
+from wiki_tools.sources import add_source
 
 
 def answer_json(summary="accepted"):
@@ -165,6 +166,15 @@ class RunnerTests(unittest.TestCase):
         page.parent.mkdir(parents=True)
         page.write_text("# Approval\nVerified page.\n", encoding="utf-8")
         return revision
+
+    def set_authorship(self, source_id, revision, authorship):
+        manifest_path = self.root / "sources" / "manifests" / f"{source_id}--{revision}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if authorship is None:
+            manifest.pop("authorship", None)
+        else:
+            manifest["authorship"] = authorship
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def test_prompt_is_one_literal_argument_and_runtime_policy_is_explicit(self):
         response = answer_json()
@@ -447,6 +457,90 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(answer["claims"][0]["citation_ids"], ["src1"])
         self.assertEqual(answer["citations"][0]["revision"], revision)
+
+    def test_ask_enriches_citation_authorship_from_manifest_and_rejects_model_label(self):
+        revision = self.register_markdown_source()
+        self.set_authorship("policy", revision, "ai-generated")
+        model_answer = json.loads(answer_json())
+        model_answer["citations"] = [
+            {
+                "citation_id": "src1",
+                "source_id": "policy",
+                "revision": revision,
+                "locator": "line:2",
+                "wiki_page": "wiki/processes/policy.md#approval",
+            }
+        ]
+        model_answer["claims"] = [
+            {
+                "claim_id": "claim1",
+                "text": "The note says to check the release window.",
+                "status": "supported",
+                "citation_ids": ["src1"],
+            }
+        ]
+        page_metadata = {
+            "id": "policy",
+            "title": "Policy",
+            "kind": "process",
+            "domain": "operations",
+            "review_status": "reviewed",
+            "source_refs": [{"source_id": "policy", "revision": revision}],
+            "depends_on": [],
+            "reviewed_at": "2026-10-09",
+        }
+        page = self.root / "wiki" / "processes" / "policy.md"
+        page.write_text(
+            "---\n" + json.dumps(page_metadata) + "\n---\n# Approval\nReviewed page.\n",
+            encoding="utf-8",
+        )
+        self.install_answer(model_answer)
+
+        answer = ask(self.root, {"question": "What does the note record?"})
+        self.assertEqual(answer["citations"][0]["authorship"], "ai-generated")
+        self.assertEqual(answer["citations"][0]["wiki_page"], "wiki/processes/policy.md#approval")
+
+        model_answer["citations"][0]["authorship"] = "human-written"
+        self.install_answer(model_answer)
+        with self.assertRaises(WikiError) as raised:
+            ask(self.root, {"question": "What does the note record?"})
+        self.assertEqual(raised.exception.code, "answer_validation_error")
+
+    def test_ask_keeps_mixed_authorship_distinct_across_citations(self):
+        ai_revision = self.register_markdown_source()
+        self.set_authorship("policy", ai_revision, "ai-generated")
+        human_path = self.root / "human-policy.md"
+        human_path.write_text("A human reviewer confirms the release window.\n", encoding="utf-8")
+        human_source = add_source(self.root, human_path, source_id="human-policy", kind="procedure")
+        self.set_authorship("human-policy", human_source["revision"], "human-written")
+
+        model_answer = json.loads(answer_json())
+        model_answer["citations"] = [
+            {
+                "citation_id": "ai1",
+                "source_id": "policy",
+                "revision": ai_revision,
+                "locator": "line:2",
+            },
+            {
+                "citation_id": "human1",
+                "source_id": "human-policy",
+                "revision": human_source["revision"],
+                "locator": "line:1",
+            },
+        ]
+        model_answer["claims"] = [
+            {"claim_id": "claim-ai", "text": "AI note claim.", "status": "supported", "citation_ids": ["ai1"]},
+            {"claim_id": "claim-human", "text": "Human note claim.", "status": "supported", "citation_ids": ["human1"]},
+        ]
+        self.install_answer(model_answer)
+
+        answer = ask(self.root, {"question": "What does each source say?"})
+
+        self.assertEqual(
+            {citation["citation_id"]: citation["authorship"] for citation in answer["citations"]},
+            {"ai1": "ai-generated", "human1": "human-written"},
+        )
 
     def test_ask_rejects_non_string_claim_status(self):
         model_answer = json.loads(answer_json())
