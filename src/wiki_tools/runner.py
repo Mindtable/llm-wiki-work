@@ -19,7 +19,7 @@ from typing import BinaryIO
 from .config import RunConfig, load_config
 from .errors import WikiError
 from .knowledge import project_inventory, wiki_page_in_project
-from .raw import is_ignored_raw_name, is_managed_raw_snapshot
+from .raw import is_confluence_link_path, is_ignored_raw_name, is_managed_raw_snapshot
 from .sources import project_matches, source_authorship, source_project, validate_project
 
 
@@ -39,15 +39,24 @@ _CLAIM_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _runtime_config(config: RunConfig) -> str:
-    permissions = {
-        "*": "deny",
-        "read": "allow",
-        "glob": "allow",
-        "grep": "allow",
-        "list": "allow",
-        "skill": "deny",
-        "external_directory": "deny",
-    }
+    if config.purpose == "confluence":
+        permissions = {
+            "*": "deny",
+            "read": {"*": "deny", "*/opencode/tool-output/*": "allow"},
+            "*_getConfluencePage": "allow",
+            "*_getAccessibleAtlassianResources": "allow",
+            "*_confluence_get_page": "allow",
+        }
+    else:
+        permissions = {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "list": "allow",
+            "skill": "deny",
+            "external_directory": "deny",
+        }
     overlay = {
         "model": config.model,
         "default_agent": config.agent,
@@ -378,6 +387,9 @@ def _knowledge_revision(root: Path) -> str:
             raw_directory = root / "sources" / "raw"
             for name in list(subdirs):
                 path = current / name
+                if area == "sources" and is_confluence_link_path(path.relative_to(root).as_posix()):
+                    subdirs.remove(name)
+                    continue
                 if area == "sources" and path.is_relative_to(raw_directory) and is_ignored_raw_name(name):
                     subdirs.remove(name)
                     continue
@@ -389,6 +401,8 @@ def _knowledge_revision(root: Path) -> str:
             for name in filenames:
                 path = current / name
                 relative_path = path.relative_to(root).as_posix()
+                if area == "sources" and is_confluence_link_path(relative_path):
+                    continue
                 in_raw = area == "sources" and path.is_relative_to(raw_directory)
                 if in_raw and is_ignored_raw_name(name) and not is_managed_raw_snapshot(relative_path):
                     continue

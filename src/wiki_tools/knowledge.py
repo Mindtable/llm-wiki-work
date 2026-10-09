@@ -751,7 +751,7 @@ def search(root: Path, query: str, *, project: str | None = None) -> list[dict[s
     return results
 
 
-def project_inventory(root: Path, project: str | None) -> dict[str, Any]:
+def project_inventory(root: Path, project: str | None, *, general_only: bool = False) -> dict[str, Any]:
     """Build a verified inventory, optionally prioritizing one project and shared material."""
     base = _root(root)
     requested_project = validate_project(project)
@@ -773,6 +773,8 @@ def project_inventory(root: Path, project: str | None) -> dict[str, Any]:
             if not isinstance(revision, str):
                 continue
             record_scope = source_project(record)
+            if general_only and record_scope is not None:
+                continue
             if not project_matches(record_scope, requested_project):
                 continue
             manifest = get_manifest(base, source_id, revision)
@@ -803,6 +805,8 @@ def project_inventory(root: Path, project: str | None) -> dict[str, Any]:
         if parse_error and parse_error != "missing frontmatter delimiter":
             continue
         page_scope = page_project(metadata) if metadata is not None else None
+        if general_only and page_scope is not None:
+            continue
         if not project_matches(page_scope, requested_project):
             continue
         if metadata is not None and not _page_source_refs_match_project(base, metadata, page_scope):

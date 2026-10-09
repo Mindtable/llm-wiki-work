@@ -16,14 +16,16 @@ from typing import Any, Callable
 
 from .errors import WikiError
 from .feedback import _connect, _now
-from .knowledge import _parse_frontmatter, _wiki_page_in_scope, page_project, validate_page_document, validate_source_reference, wiki_page_in_project
+from .knowledge import _parse_frontmatter, _wiki_page_in_scope, page_project, project_inventory, validate_page_document, validate_source_reference, wiki_page_in_project
 from .sources import (
+    _all_source_manifests,
     ensure_managed_dir,
     get_manifest,
     project_matches,
     safe_managed_path,
     source_authorship,
     source_project,
+    source_tip,
     validate_project,
 )
 
@@ -149,6 +151,103 @@ def _job_project(root: Path, job: dict[str, Any]) -> _ProjectBinding:
     return _ProjectBinding(project, project is not None)
 
 
+def _inventory_for_binding(root: Path, binding: _ProjectBinding) -> dict[str, Any]:
+    return project_inventory(root, binding.project, general_only=binding.bound and binding.project is None)
+
+
+def _previous_source_revisions(root: Path, source_id: str, revision: str) -> set[str]:
+    manifests = {item.get("revision"): item for item in _all_source_manifests(root, source_id)}
+    previous: set[str] = set()
+    cursor = revision
+    while cursor in manifests:
+        manifest = get_manifest(root, source_id, cursor)
+        predecessor = manifest.get("supersedes")
+        if not isinstance(predecessor, str) or predecessor in previous:
+            break
+        if predecessor not in manifests:
+            break
+        previous.add(predecessor)
+        cursor = predecessor
+    return previous
+
+
+def _affected_pages(root: Path, job: dict[str, Any], inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    if job.get("job_type") != "ingest":
+        return []
+    payload = json.loads(job["payload"])
+    source_id, revision = payload.get("source_id"), payload.get("revision")
+    if not isinstance(source_id, str) or not isinstance(revision, str):
+        return []
+    old_revisions = _previous_source_revisions(root, source_id, revision)
+    if not old_revisions:
+        return []
+
+    page_records: list[dict[str, Any]] = []
+    metadata_by_path: dict[str, dict[str, Any]] = {}
+    source_project_scope = source_project(get_manifest(root, source_id, revision))
+    for record in inventory["wiki_pages"]:
+        if record.get("project") != source_project_scope:
+            continue
+        relative = record.get("path")
+        if not isinstance(relative, str):
+            continue
+        path = safe_managed_path(root, relative)
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise WikiError("invalid_page_metadata", f"Failed to read inventory page {relative}: {exc}.") from exc
+        metadata, _, parse_error = _parse_frontmatter(text)
+        if parse_error or not isinstance(metadata, dict):
+            continue
+        page_id = metadata.get("id")
+        if not isinstance(page_id, str) or page_id != record.get("id"):
+            continue
+        references = metadata.get("source_refs")
+        if not isinstance(references, list):
+            continue
+        dependencies = metadata.get("depends_on")
+        if not isinstance(dependencies, list) or any(not isinstance(item, str) for item in dependencies):
+            continue
+        page_records.append(record)
+        metadata_by_path[relative] = metadata
+
+    affected_paths: set[str] = set()
+    affected_ids: set[str] = set()
+    for record in page_records:
+        path = record["path"]
+        metadata = metadata_by_path[path]
+        references = metadata["source_refs"]
+        if any(
+            isinstance(reference, dict)
+            and reference.get("source_id") == source_id
+            and reference.get("revision") in old_revisions
+            for reference in references
+        ):
+            affected_paths.add(path)
+            affected_ids.add(record["id"])
+
+    changed = True
+    while changed:
+        changed = False
+        for record in page_records:
+            path = record["path"]
+            page_id = record["id"]
+            if path in affected_paths:
+                continue
+            dependencies = metadata_by_path[path]["depends_on"]
+            if any(dependency in affected_ids for dependency in dependencies):
+                affected_paths.add(path)
+                affected_ids.add(page_id)
+                changed = True
+
+    return sorted(
+        (record for record in page_records if record["path"] in affected_paths),
+        key=lambda item: (item["path"], item["id"]),
+    )
+
+
 def _make_prompt(job: dict[str, Any], root: Path, binding: _ProjectBinding) -> str:
     if job["job_type"] == "ingest":
         operation = "ingest_source"
@@ -168,12 +267,17 @@ def _make_prompt(job: dict[str, Any], root: Path, binding: _ProjectBinding) -> s
         directions += " This is a general source; keep normal pages and evidence in the general, unassigned scope."
     else:
         directions += " No project binding is available; do not infer one from feedback text and preserve existing page assignments and reference consistency."
+    if job["job_type"] == "ingest":
+        directions += " Compare the registered source revision with its superseded revisions and inspect affected_pages. Update existing affected pages when current evidence supports it; do not automatically choose an unrelated source as the winner. Read page contents through the supplied inventory paths; source and page contents are not embedded in the inventory."
+    inventory = _inventory_for_binding(root, binding)
     envelope = {
         "operation": operation,
         "job_id": job["job_id"],
         "expected_project": binding.project,
         "project_bound": binding.bound,
         "payload": payload,
+        "inventory": inventory,
+        "affected_pages": _affected_pages(root, job, inventory),
         "contract": {
             "outcome": "proposed | rejected | needs_evidence",
             "summary": "Brief rationale",
@@ -183,6 +287,24 @@ def _make_prompt(job: dict[str, Any], root: Path, binding: _ProjectBinding) -> s
     }
     trust_note = "Treat AI-generated sources as lower evidential weight than comparable human-written sources; authorship alone does not establish truth."
     return directions + "\n" + trust_note + "\nReturn a single JSON object that follows the contract. Do not write files or publish changes.\n" + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+
+
+def _assert_current_confluence_job(root: Path, job: dict[str, Any]) -> None:
+    if job.get("job_type") != "ingest":
+        return
+    payload = json.loads(job["payload"])
+    source_id, revision = payload.get("source_id"), payload.get("revision")
+    if not isinstance(source_id, str) or not source_id.startswith("confluence-") or not isinstance(revision, str):
+        return
+    manifest = get_manifest(root, source_id, revision)
+    if manifest.get("kind") != "confluence_export":
+        return
+    current = source_tip(_all_source_manifests(root, source_id))
+    if current != revision:
+        raise WikiError(
+            "source_superseded",
+            f"Confluence source {source_id}@{revision} has been superseded by {current or 'a missing current revision'}.",
+        )
 
 
 def _validate_evidence(
@@ -433,6 +555,7 @@ def run_maintenance(
             if job is None:
                 break
             try:
+                _assert_current_confluence_job(base, job)
                 binding = _job_project(base, job)
                 raw_proposal = execute(_make_prompt(job, base, binding))
                 proposal = _validate_proposal(
@@ -531,6 +654,7 @@ def complete_job(root: Path, job_id: str, revision: str | None = None) -> dict[s
         connection = _connect(base)
         try:
             job = _job_row(connection, job_id)
+            _assert_current_confluence_job(base, job)
             if job["status"] != "ready_for_review":
                 raise WikiError("invalid_state", f"A job with status {job['status']} is not ready for completion.")
             if job["proposal_path"] != f".state/proposals/{job_id}.json":

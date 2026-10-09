@@ -83,8 +83,8 @@ def _profile_mode(root: Path, agent: str) -> tuple[str, str]:
 
 
 def load_config(root: Path, purpose: str = "ask") -> RunConfig:
-    """Load the trusted wiki profile; maintenance inherits ask's execution limits."""
-    if purpose not in {"ask", "maintenance"}:
+    """Load a trusted wiki profile; non-ask purposes inherit ask's execution limits."""
+    if purpose not in {"ask", "maintenance", "confluence"}:
         raise WikiError("configuration_error", f"Unknown run purpose: {purpose}.")
     root = _root_path(root)
     config_path = root / "wiki.toml"
@@ -116,7 +116,12 @@ def load_config(root: Path, purpose: str = "ask") -> RunConfig:
     configured_agent = ask.get("agent", "librarian")
     if not isinstance(configured_agent, str) or not _AGENT_ID.fullmatch(configured_agent):
         raise WikiError("configuration_error", "The agent parameter must be a safe profile identifier.")
-    agent = configured_agent if purpose == "ask" else "wiki-maintainer"
+    if purpose == "ask":
+        agent = configured_agent
+    elif purpose == "maintenance":
+        agent = "wiki-maintainer"
+    else:
+        agent = "wiki-source-sync"
     _, profile_prompt = _profile_mode(root, agent)
 
     executable = ask.get("executable", "opencode")

@@ -13,7 +13,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from wiki_tools.errors import WikiError
 from wiki_tools.feedback import feedback_status, submit_feedback
-from wiki_tools.maintenance import _job_project, _validate_proposal, complete_job, retry_job, run_maintenance
+from wiki_tools.maintenance import _ProjectBinding, _job_project, _make_prompt, _validate_proposal, complete_job, retry_job, run_maintenance
 from wiki_tools.sources import add_source
 
 
@@ -123,6 +123,105 @@ class MaintenanceTests(unittest.TestCase):
         expected_proposal["evidence"][0]["project"] = None
         self.assertEqual(json.loads(proposal_path.read_text(encoding="utf-8")), expected_proposal)
         self.assertEqual(feedback_status(root, submitted["feedback_id"])["status"], "ready_for_review")
+
+    def test_maintenance_prompt_includes_scoped_inventory_and_dependent_pages(self):
+        root = self.make_root()
+        source_path = root / "confluence-page.md"
+        source_path.write_text("Old page content.\n", encoding="utf-8")
+        old = add_source(root, source_path, source_id="confluence-page", kind="confluence_export")
+        source_path.write_text("Current page content.\n", encoding="utf-8")
+        current = add_source(root, source_path, source_id="confluence-page", kind="confluence_export")
+
+        def page(page_id, *, project=None, source_refs=None, depends_on=None):
+            metadata = {
+                "id": page_id,
+                "title": page_id.title(),
+                "kind": "process",
+                "domain": "operations",
+                "review_status": "draft",
+                "source_refs": source_refs or [],
+                "depends_on": depends_on or [],
+                "reviewed_at": None,
+            }
+            if project is not None:
+                metadata["scope"] = {"project": project}
+            return "---\n" + json.dumps(metadata) + "\n---\nPage body.\n"
+
+        pages = root / "wiki" / "processes"
+        (pages / "base.md").write_text(
+            page("base", source_refs=[{"source_id": "confluence-page", "revision": old["revision"]}]),
+            encoding="utf-8",
+        )
+        (pages / "dependent.md").write_text(page("dependent", depends_on=["base"]), encoding="utf-8")
+        (pages / "unrelated.md").write_text(page("unrelated"), encoding="utf-8")
+        (pages / "atlas.md").write_text(page("atlas-page", project="atlas"), encoding="utf-8")
+
+        job = {
+            "job_id": "e" * 32,
+            "job_type": "ingest",
+            "payload": json.dumps({"source_id": "confluence-page", "revision": current["revision"]}),
+        }
+        prompt = _make_prompt(job, root, _ProjectBinding(None, True))
+        envelope = json.loads(prompt.splitlines()[-1])
+
+        self.assertEqual([page["id"] for page in envelope["affected_pages"]], ["base", "dependent"])
+        self.assertEqual({source["project"] for source in envelope["inventory"]["sources"]}, {None})
+        self.assertEqual({page["project"] for page in envelope["inventory"]["wiki_pages"]}, {None})
+        self.assertIn("confluence-page", [source["source_id"] for source in envelope["inventory"]["sources"]])
+
+        unbound_prompt = _make_prompt(job, root, _ProjectBinding(None, False))
+        unbound = json.loads(unbound_prompt.splitlines()[-1])
+        self.assertIn("atlas-page", [page["id"] for page in unbound["inventory"]["wiki_pages"]])
+
+        scoped_prompt = _make_prompt(job, root, _ProjectBinding("atlas", True))
+        scoped = json.loads(scoped_prompt.splitlines()[-1])
+        self.assertEqual({source["project"] for source in scoped["inventory"]["sources"]}, {None})
+
+    def test_scoped_source_affected_pages_exclude_general_dependents(self):
+        root = self.make_root()
+        source_path = root / "atlas-confluence.md"
+        source_path.write_text("Old Atlas content.\n", encoding="utf-8")
+        old = add_source(root, source_path, source_id="confluence-atlas-page", kind="confluence_export", project="atlas")
+        source_path.write_text("Current Atlas content.\n", encoding="utf-8")
+        current = add_source(root, source_path, source_id="confluence-atlas-page", kind="confluence_export")
+
+        def page(page_id, *, project=None, source_refs=None, depends_on=None):
+            metadata = {
+                "id": page_id,
+                "title": page_id.title(),
+                "kind": "process",
+                "domain": "operations",
+                "review_status": "draft",
+                "source_refs": source_refs or [],
+                "depends_on": depends_on or [],
+                "reviewed_at": None,
+            }
+            if project is not None:
+                metadata["scope"] = {"project": project}
+            return "---\n" + json.dumps(metadata) + "\n---\nPage body.\n"
+
+        pages = root / "wiki" / "processes"
+        (pages / "atlas.md").write_text(
+            page(
+                "atlas-page",
+                project="atlas",
+                source_refs=[{"source_id": "confluence-atlas-page", "revision": old["revision"]}],
+            ),
+            encoding="utf-8",
+        )
+        (pages / "general-dependent.md").write_text(
+            page("general-dependent", depends_on=["atlas-page"]), encoding="utf-8"
+        )
+        job = {
+            "job_id": "d" * 32,
+            "job_type": "ingest",
+            "payload": json.dumps({"source_id": "confluence-atlas-page", "revision": current["revision"]}),
+        }
+
+        envelope = json.loads(_make_prompt(job, root, _ProjectBinding("atlas", True)).splitlines()[-1])
+
+        self.assertEqual([page["id"] for page in envelope["affected_pages"]], ["atlas-page"])
+        self.assertIn("wiki/processes/general-dependent.md", {page["path"] for page in envelope["inventory"]["wiki_pages"]})
 
     def test_maintenance_discovers_raw_drop_and_queues_ingest_under_writer_lock(self):
         from wiki_tools.feedback import _connect
@@ -589,6 +688,64 @@ class MaintenanceTests(unittest.TestCase):
         with self.assertRaises(WikiError) as missing:
             run_maintenance(root, lambda prompt: self.fail("missing target must not execute"), job_id="f" * 32)
         self.assertEqual(missing.exception.code, "job_not_found")
+
+    def test_targeted_confluence_ingest_of_superseded_revision_fails_without_model_call(self):
+        from wiki_tools.feedback import _connect, enqueue_ingest
+
+        root = self.make_root()
+        source_path = root / "confluence.md"
+        source_path.write_text("Revision one.\n", encoding="utf-8")
+        first = add_source(root, source_path, source_id="confluence-42", kind="confluence_export")
+        queued = enqueue_ingest(root, "confluence-42", first["revision"])
+        source_path.write_text("Revision two.\n", encoding="utf-8")
+        add_source(root, source_path, source_id="confluence-42", kind="confluence_export")
+        called = []
+
+        def execute(prompt):
+            called.append(prompt)
+            return {"outcome": "needs_evidence", "summary": "Need more evidence.", "changes": [], "evidence": []}
+
+        result = run_maintenance(root, execute, job_id=queued["job_id"])
+
+        self.assertEqual(result["items"][0]["status"], "failed")
+        self.assertIn("source_superseded", result["items"][0]["error"])
+        self.assertEqual(called, [])
+        connection = _connect(root)
+        try:
+            row = connection.execute("SELECT status, error FROM jobs WHERE job_id = ?", (queued["job_id"],)).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("source_superseded", row["error"])
+
+    def test_completing_confluence_proposal_after_newer_revision_is_refused(self):
+        from wiki_tools.feedback import _connect, enqueue_ingest
+
+        source_path = self.make_root() / "confluence.md"
+        root = source_path.parent
+        source_path.write_text("Revision one.\n", encoding="utf-8")
+        first = add_source(root, source_path, source_id="confluence-42", kind="confluence_export")
+        queued = enqueue_ingest(root, "confluence-42", first["revision"])
+        run_maintenance(
+            root,
+            lambda prompt: {"outcome": "needs_evidence", "summary": "Need more evidence.", "changes": [], "evidence": []},
+            job_id=queued["job_id"],
+        )
+        source_path.write_text("Revision two.\n", encoding="utf-8")
+        add_source(root, source_path, source_id="confluence-42", kind="confluence_export")
+
+        with self.assertRaises(WikiError) as stale:
+            complete_job(root, queued["job_id"])
+
+        self.assertEqual(stale.exception.code, "source_superseded")
+        connection = _connect(root)
+        try:
+            connection.execute("UPDATE jobs SET status = 'failed' WHERE job_id = ?", (queued["job_id"],))
+        finally:
+            connection.close()
+        with self.assertRaises(WikiError) as superseded:
+            complete_job(root, queued["job_id"])
+        self.assertEqual(superseded.exception.code, "source_superseded")
 
     def test_completion_updates_job_outcome_from_edited_saved_proposal(self):
         from wiki_tools.feedback import _connect

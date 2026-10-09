@@ -49,6 +49,12 @@ def is_managed_raw_snapshot(relative: str) -> bool:
     )
 
 
+def is_confluence_link_path(relative: str) -> bool:
+    """Return whether a path is inside the reserved Confluence link-list tree."""
+    parts = PurePosixPath(str(relative).replace("\\", "/")).parts
+    return len(parts) >= 4 and parts[:4] == ("sources", "raw", "human-written", "confluence")
+
+
 def _raw_files(root: Path) -> Iterator[tuple[str, Path]]:
     base = _root(root)
     try:
@@ -75,6 +81,8 @@ def _raw_files(root: Path) -> Iterator[tuple[str, Path]]:
             candidate = current / name
             if is_ignored_raw_name(name) or candidate.is_symlink():
                 continue
+            if is_confluence_link_path(candidate.relative_to(base).as_posix()):
+                continue
             try:
                 mode = candidate.lstat().st_mode
             except OSError as exc:
@@ -96,7 +104,7 @@ def _raw_files(root: Path) -> Iterator[tuple[str, Path]]:
             if not stat.S_ISREG(mode):
                 continue
             relative = candidate.relative_to(base).as_posix()
-            if is_managed_raw_snapshot(relative):
+            if is_managed_raw_snapshot(relative) or is_confluence_link_path(relative):
                 continue
             yield relative, candidate
 

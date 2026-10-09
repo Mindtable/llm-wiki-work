@@ -83,9 +83,11 @@ def _build_parser() -> _JsonArgumentParser:
 
     maintenance = commands.add_parser("maintenance", help="Process the queue manually.")
     maintenance_commands = maintenance.add_subparsers(dest="maintenance_command", required=True)
+    maintenance_commands.add_parser("sync", help="Check tracked Confluence page URLs and queue changed snapshots.")
     run = maintenance_commands.add_parser("run", help="Prepare a bounded number of proposals.")
     run.add_argument("--limit", type=int, default=1)
     run.add_argument("--id", dest="job_id", help="Run only this pending job.")
+    run.add_argument("--skip-sync", action="store_true", help="Skip the Confluence sync performed by ordinary runs.")
     review = maintenance_commands.add_parser("review", help="Review a saved proposal.")
     review.add_argument("--id", dest="job_id", help="Review this ready proposal; otherwise choose the next ready proposal.")
     review.add_argument("--format", choices=("json", "markdown"), default="json")
@@ -183,6 +185,21 @@ def _read_json_object(path: Path, description: str) -> dict[str, Any]:
     return payload
 
 
+def _sync_confluence(root: Path) -> dict[str, Any]:
+    """Check tracked Confluence URLs, loading the source-sync profile only when needed."""
+    from .confluence import sync_confluence
+
+    config = None
+
+    def execute(prompt: str) -> dict[str, Any]:
+        nonlocal config
+        if config is None:
+            config = load_config(root, purpose="confluence")
+        return run_opencode(root, config, prompt)
+
+    return sync_confluence(root, execute)
+
+
 def _dispatch(args: argparse.Namespace, root: Path) -> Any:
     if args.command == "source" and args.source_command == "add":
         from .sources import add_source
@@ -242,12 +259,22 @@ def _dispatch(args: argparse.Namespace, root: Path) -> Any:
         from .knowledge import lint
 
         return lint(root)
+    if args.command == "maintenance" and args.maintenance_command == "sync":
+        return _sync_confluence(root)
     if args.command == "maintenance" and args.maintenance_command == "run":
         from .maintenance import run_maintenance
 
+        if args.limit < 1:
+            raise WikiError("invalid_limit", "limit must be a positive integer.")
+        confluence_report = None
+        if args.job_id is None and not args.skip_sync:
+            confluence_report = _sync_confluence(root)
         config = load_config(root, purpose="maintenance")
         execute = lambda prompt: run_opencode(root, config, prompt)
-        return run_maintenance(root, execute, limit=args.limit, job_id=args.job_id)
+        result = run_maintenance(root, execute, limit=args.limit, job_id=args.job_id)
+        if confluence_report is not None:
+            result = {**result, "confluence": confluence_report}
+        return result
     if args.command == "maintenance" and args.maintenance_command == "review":
         from .review import render_review, review_proposal
 
@@ -272,11 +299,17 @@ def _operation_failed(args: argparse.Namespace, result: Any) -> bool:
     if args.command == "lint":
         errors = result.get("errors")
         return isinstance(errors, list) and bool(errors)
+    if args.command == "maintenance" and args.maintenance_command == "sync":
+        errors = result.get("errors")
+        return isinstance(errors, list) and bool(errors)
     if args.command == "maintenance" and args.maintenance_command == "run":
         items = result.get("items")
-        return isinstance(items, list) and any(
+        failed_items = isinstance(items, list) and any(
             isinstance(item, dict) and item.get("status") == "failed" for item in items
         )
+        confluence_report = result.get("confluence")
+        errors = confluence_report.get("errors") if isinstance(confluence_report, dict) else None
+        return failed_items or (isinstance(errors, list) and bool(errors))
     return False
 
 

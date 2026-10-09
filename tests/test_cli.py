@@ -197,6 +197,129 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertEqual(value, failed_result)
 
+    def test_maintenance_sync_with_no_registered_urls_does_not_load_model_config(self):
+        config_path = self.root / "wiki.toml"
+        config_path.unlink()
+        (self.root / "sources" / "raw" / "human-written" / "confluence").mkdir(parents=True)
+        report = {"checked": 0, "changed": 0, "unchanged": 0, "items": [], "errors": []}
+
+        stdout = io.StringIO()
+        with patch("wiki_tools.cli.load_config", side_effect=AssertionError("empty sync must not load config")), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "maintenance", "sync"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), report)
+
+    def test_confluence_sync_executor_loads_dedicated_profile_only_for_page_fetch(self):
+        report = {"checked": 1, "changed": 1, "unchanged": 0, "items": [], "errors": []}
+        config_value = object()
+
+        def sync(root, execute):
+            self.assertEqual(root, self.root)
+            execute("fetch one page")
+            return report
+
+        stdout = io.StringIO()
+        with patch("wiki_tools.confluence.sync_confluence", side_effect=sync), patch(
+            "wiki_tools.cli.load_config", return_value=config_value
+        ) as load, patch("wiki_tools.cli.run_opencode", return_value={"status": "ok"}) as runner, redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "maintenance", "sync"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), report)
+        load.assert_called_once_with(self.root, purpose="confluence")
+        runner.assert_called_once_with(self.root, config_value, "fetch one page")
+
+    def test_maintenance_sync_reports_partial_page_errors_as_failure(self):
+        report = {
+            "checked": 2,
+            "changed": 1,
+            "unchanged": 0,
+            "items": [{"status": "updated"}, {"status": "failed"}],
+            "errors": [{"code": "fetch_failed"}],
+        }
+        with patch("wiki_tools.confluence.sync_confluence", return_value=report):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                exit_code = main(["--root", str(self.root), "maintenance", "sync"])
+
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), report)
+
+    def test_ordinary_maintenance_run_syncs_once_but_skip_and_targeted_runs_do_not(self):
+        ready = {"processed": 0, "items": []}
+        report = {"checked": 1, "changed": 1, "unchanged": 0, "items": [], "errors": []}
+        for suffix, expected_syncs in (([], 1), (["--skip-sync"], 0), (["--id", "a" * 32], 0)):
+            with self.subTest(suffix=suffix):
+                sync = patch("wiki_tools.cli._sync_confluence", return_value=report)
+                runner = patch("wiki_tools.maintenance.run_maintenance", return_value=ready)
+                config = patch("wiki_tools.cli.load_config", return_value=object())
+                stdout = io.StringIO()
+                with sync as syncer, runner as run, config, redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    exit_code = main(["--root", str(self.root), "maintenance", "run", *suffix])
+                self.assertEqual(exit_code, 0)
+                output = self.assert_one_json_line(stdout.getvalue())
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(syncer.call_count, expected_syncs)
+                self.assertEqual("confluence" in output, expected_syncs == 1)
+
+    def test_review_complete_and_retry_never_trigger_confluence_sync(self):
+        with patch("wiki_tools.cli._sync_confluence", side_effect=AssertionError("read routes must not sync")):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["--root", str(self.root), "maintenance", "review"]), 0)
+            self.assertEqual(self.assert_one_json_line(stdout.getvalue())["status"], "no_ready_proposals")
+
+            for action in ("complete", "retry"):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    exit_code = main(["--root", str(self.root), "maintenance", action, "--id", "f" * 32])
+                self.assertNotEqual(exit_code, 0)
+                self.assertIn(self.assert_one_json_line(stdout.getvalue())["error"]["code"], {"job_not_found", "invalid_state"})
+
+    def test_ask_search_and_ingest_never_trigger_confluence_sync(self):
+        with patch("wiki_tools.cli._sync_confluence", side_effect=AssertionError("non-maintenance routes must not sync")) as syncer, patch(
+            "wiki_tools.cli.ask", return_value={"answer": "answer"}
+        ), patch("wiki_tools.knowledge.search", return_value=[]), patch(
+            "wiki_tools.feedback.enqueue_ingest", return_value={"job_id": "a" * 32, "status": "pending"}
+        ):
+            for argv in (
+                ["--root", str(self.root), "ask", "A question"],
+                ["--root", str(self.root), "search", "query"],
+                ["--root", str(self.root), "ingest", "source-id", "b" * 64],
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(argv), 0)
+                self.assertEqual(stdout.getvalue().count("\n"), 1)
+
+        syncer.assert_not_called()
+
+    def test_maintenance_run_reports_nested_sync_errors_as_failure(self):
+        result = {
+            "processed": 0,
+            "items": [],
+            "confluence": {"checked": 1, "changed": 0, "unchanged": 0, "items": [], "errors": [{"code": "fetch_failed"}]},
+        }
+        code, value = self.invoke_mocked_result(["--root", str(self.root), "maintenance", "run"], result)
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(value, result)
+
+    def test_ordinary_run_keeps_processing_after_partial_sync_errors(self):
+        report = {"checked": 2, "changed": 1, "unchanged": 0, "items": [], "errors": [{"code": "fetch_failed"}]}
+        result = {"processed": 1, "items": [{"job_id": "b" * 32, "status": "ready_for_review"}]}
+        stdout = io.StringIO()
+        with patch("wiki_tools.cli._sync_confluence", return_value=report) as syncer, patch(
+            "wiki_tools.cli.load_config", return_value=object()
+        ), patch("wiki_tools.maintenance.run_maintenance", return_value=result) as runner, redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            exit_code = main(["--root", str(self.root), "maintenance", "run"])
+
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(syncer.call_count, 1)
+        self.assertEqual(self.assert_one_json_line(stdout.getvalue()), {**result, "confluence": report})
+
     def test_ready_maintenance_item_and_empty_queue_are_success(self):
         for result in (
             {"processed": 0, "items": []},

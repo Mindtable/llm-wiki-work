@@ -7,7 +7,7 @@ from wiki_tools.config import load_config
 from wiki_tools.errors import WikiError
 
 
-def make_root(config: str, *, agents=("librarian", "wiki-maintainer")) -> Path:
+def make_root(config: str, *, agents=("librarian", "wiki-maintainer", "wiki-source-sync")) -> Path:
     root = Path(tempfile.mkdtemp(prefix="wiki-config-")).resolve()
     (root / ".opencode" / "agents").mkdir(parents=True)
     (root / "wiki.toml").write_text(config, encoding="utf-8")
@@ -75,6 +75,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.variant, "high")
         self.assertEqual(config.timeout_seconds, 37)
         self.assertEqual(config.max_steps, 6)
+
+    def test_confluence_inherits_limits_and_selects_source_sync_profile(self):
+        root = make_root(
+            '[ask]\nmodel = "provider/model"\nvariant = "high"\n'
+            "timeout_seconds = 37\nmax_steps = 6\nagent = \"librarian\"\n"
+        )
+
+        config = load_config(root, purpose="confluence")
+
+        self.assertEqual(config.agent, "wiki-source-sync")
+        self.assertEqual(config.model, "provider/model")
+        self.assertEqual(config.variant, "high")
+        self.assertEqual(config.timeout_seconds, 37)
+        self.assertEqual(config.max_steps, 6)
+        self.assertEqual(config.purpose, "confluence")
+
+    def test_unknown_ask_settings_still_fail(self):
+        root = make_root('[ask]\nmodel = "provider/model"\nnew_option = true\n')
+
+        with self.assertRaises(WikiError) as raised:
+            load_config(root, purpose="confluence")
+
+        self.assertEqual(raised.exception.code, "configuration_error")
+        self.assertIn("new_option", raised.exception.message)
 
     def test_missing_or_non_primary_agent_fails_before_opencode_fallback(self):
         root = make_root('[ask]\nmodel = "provider/model"\n')

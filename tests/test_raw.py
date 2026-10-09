@@ -124,6 +124,26 @@ class RawDropTests(unittest.TestCase):
         self.assertFalse((self.root / "sources" / "manifests").exists())
         self.assertFalse((self.root / ".state").exists())
 
+    def test_discovery_excludes_only_the_reserved_human_written_confluence_tree(self):
+        raw = self.root / "sources" / "raw"
+        link_list = raw / "human-written" / "confluence" / "links.md"
+        human_note = raw / "human-written" / "ordinary.md"
+        other_bucket = raw / "other" / "confluence" / "ordinary.md"
+        for path in (link_list, human_note, other_bucket):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("https://example.atlassian.net/wiki/spaces/OPS/pages/123/Title\n", encoding="utf-8")
+
+        manifests = discover_raw_sources(self.root)
+
+        self.assertEqual(
+            {item["origin"] for item in manifests},
+            {
+                "sources/raw/human-written/ordinary.md",
+                "sources/raw/other/confluence/ordinary.md",
+            },
+        )
+        self.assertTrue(link_list.is_file())
+
     def test_scanner_reports_historical_revision_reappearance(self):
         dropped = self.root / "sources" / "raw" / "policy.md"
         dropped.write_text("Version A approval.\n", encoding="utf-8")

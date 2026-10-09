@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -16,7 +17,7 @@ from wiki_tools.knowledge import (
     wiki_page_in_project,
 )
 from wiki_tools.errors import WikiError
-from wiki_tools.sources import add_source
+from wiki_tools.sources import add_source, get_manifest
 
 
 class KnowledgeTests(unittest.TestCase):
@@ -370,6 +371,34 @@ class KnowledgeTests(unittest.TestCase):
         results = search(root, "Atlas shared", project="atlas")
         self.assertEqual([row["id"] for row in results if row["type"] == "source"], ["atlas-note"])
         self.assertEqual(inventory["sources"][0]["revision"], atlas["revision"])
+
+    def test_general_only_inventory_skips_foreign_sources_and_page_references_before_validation(self):
+        root = self.make_root()
+        general = self.register_source(root, "general-note", "Shared material.\n")
+        foreign = self.register_source(root, "atlas-note", "Atlas material.\n", "atlas")
+        general_page = self.page_metadata(
+            "general-page",
+            source_refs=[{"source_id": "general-note", "revision": general["revision"]}],
+        )
+        foreign_page = self.page_metadata(
+            "atlas-page",
+            project="atlas",
+            source_refs=[{"source_id": "atlas-note", "revision": foreign["revision"]}],
+        )
+        (root / "wiki" / "processes" / "general-page.md").write_text(
+            "---\n" + json.dumps(general_page) + "\n---\nShared page.\n", encoding="utf-8"
+        )
+        (root / "wiki" / "processes" / "atlas-page.md").write_text(
+            "---\n" + json.dumps(foreign_page) + "\n---\nAtlas page.\n", encoding="utf-8"
+        )
+        (root / foreign["local_path"]).write_text("Corrupted foreign snapshot.\n", encoding="utf-8")
+
+        with patch("wiki_tools.knowledge.get_manifest", wraps=get_manifest) as manifest_reader:
+            inventory = project_inventory(root, None, general_only=True)
+
+        self.assertEqual({row["source_id"] for row in inventory["sources"]}, {"general-note"})
+        self.assertEqual({row["path"] for row in inventory["wiki_pages"]}, {"wiki/processes/general-page.md"})
+        self.assertFalse(any(call.args[1] == "atlas-note" for call in manifest_reader.call_args_list))
 
     def test_page_scope_and_source_refs_must_be_compatible(self):
         root = self.make_root()

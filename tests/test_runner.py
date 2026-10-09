@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from wiki_tools.config import RunConfig
 from wiki_tools.errors import WikiError
-from wiki_tools.runner import _validate_answer, _validate_request, ask, run_opencode
+from wiki_tools.runner import _knowledge_revision, _runtime_config, _validate_answer, _validate_request, ask, run_opencode
 from wiki_tools.sources import add_source
 
 
@@ -230,6 +230,78 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(profile["permission"]["read"], "allow")
         self.assertEqual(profile["permission"]["skill"], "deny")
         self.assertFalse((self.root / "should-not-exist").exists())
+
+    def test_confluence_profile_can_call_only_the_configured_read_mcp_tool_names(self):
+        executable = self.root / "fake-opencode"
+        config = RunConfig(
+            root=self.root,
+            executable=str(executable),
+            agent="wiki-source-sync",
+            model="test/fake",
+            variant=None,
+            timeout_seconds=5,
+            max_steps=4,
+            purpose="confluence",
+            profile_prompt="trusted source-sync profile",
+        )
+
+        permissions = json.loads(_runtime_config(config))["agent"]["wiki-source-sync"]["permission"]
+
+        self.assertEqual(
+            set(permissions),
+            {"*", "read", "*_getConfluencePage", "*_getAccessibleAtlassianResources", "*_confluence_get_page"},
+        )
+        self.assertEqual(permissions["*"], "deny")
+        self.assertEqual(
+            permissions["read"],
+            {"*": "deny", "*/opencode/tool-output/*": "allow"},
+        )
+        self.assertEqual(
+            {name for name, action in permissions.items() if action == "allow"},
+            {"*_getConfluencePage", "*_getAccessibleAtlassianResources", "*_confluence_get_page"},
+        )
+
+    def test_ask_and_maintenance_keep_file_reads_without_mcp_overrides(self):
+        for purpose, agent in (("ask", "librarian"), ("maintenance", "wiki-maintainer")):
+            with self.subTest(purpose=purpose):
+                config = RunConfig(
+                    root=self.root,
+                    executable=str(self.root / "fake-opencode"),
+                    agent=agent,
+                    model="test/fake",
+                    variant=None,
+                    timeout_seconds=5,
+                    max_steps=4,
+                    purpose=purpose,
+                    profile_prompt="trusted profile",
+                )
+
+                permissions = json.loads(_runtime_config(config))["agent"][agent]["permission"]
+
+                self.assertEqual(permissions["*"], "deny")
+                self.assertEqual(permissions["read"], "allow")
+                self.assertNotIsInstance(permissions["read"], dict)
+                self.assertNotIn("*_getConfluencePage", permissions)
+                self.assertNotIn("*_getAccessibleAtlassianResources", permissions)
+                self.assertNotIn("*_confluence_get_page", permissions)
+
+    def test_confluence_link_controls_do_not_change_knowledge_revision_but_sources_do(self):
+        controls = self.root / "sources" / "raw" / "human-written" / "confluence"
+        controls.mkdir(parents=True)
+        link_file = controls / "links.md"
+        link_file.write_text("https://example.atlassian.net/wiki/spaces/OPS/pages/42/Runbook\n", encoding="utf-8")
+
+        first_revision = _knowledge_revision(self.root)
+        link_file.write_bytes(b"\x00\xffmalformed control input")
+        self.assertEqual(first_revision, _knowledge_revision(self.root))
+
+        source_path = self.root / "registered-source.md"
+        source_path.write_text("First registered revision.\n", encoding="utf-8")
+        add_source(self.root, source_path, source_id="registered-note", kind="unclassified")
+        first_source_revision = _knowledge_revision(self.root)
+        source_path.write_text("Second registered revision.\n", encoding="utf-8")
+        add_source(self.root, source_path, source_id="registered-note", kind="unclassified")
+        self.assertNotEqual(first_source_revision, _knowledge_revision(self.root))
 
     def test_ask_registers_a_raw_drop_before_the_librarian_process_starts(self):
         import hashlib
